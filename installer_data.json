@@ -1,0 +1,31 @@
+{
+  "name": "GitHub Account Manager",
+  "version": "1.0.0",
+  "description": "Manage multiple GitHub accounts and repositories",
+  "author": "GitHub Account Manager Team",
+  "platforms": {
+    "windows": {
+      "executable": "GitHubAccountManager.exe",
+      "requirements": [
+        "Git for Windows"
+      ],
+      "install_path": "%APPDATA%\\GitHubAccountManager"
+    },
+    "darwin": {
+      "executable": "GitHubAccountManager.app",
+      "requirements": [
+        "Git",
+        "Xcode Command Line Tools"
+      ],
+      "install_path": "/Applications"
+    },
+    "linux": {
+      "executable": "GitHubAccountManager",
+      "requirements": [
+        "git",
+        "python3-tk"
+      ],
+      "install_path": "/opt/githubaccountmanager"
+    }
+  }
+}

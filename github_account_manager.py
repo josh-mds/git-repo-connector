@@ -1,6 +1,6 @@
 import os
 import tkinter as tk
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, ttk
 from git import Repo
 from pathlib import Path
 import re
@@ -8,886 +8,1289 @@ import subprocess
 import platform
 import requests
 import json
+import threading
+from dataclasses import dataclass
+from typing import Optional, Dict, List, Tuple
+from enum import Enum
+import webbrowser
 
-class GitHubAccountManager:
+class SetupStep(Enum):
+    """Setup wizard steps"""
+    WELCOME = "welcome"
+    DEPENDENCIES = "dependencies"
+    SSH_SETUP = "ssh_setup"
+    GITHUB_SETUP = "github_setup"
+    COMPLETE = "complete"
+
+@dataclass
+class Account:
+    """Account data structure"""
+    name: str
+    email: str
+    ssh_key_path: str
+    github_username: Optional[str] = None
+    token: Optional[str] = None
+
+class DependencyChecker:
+    """Check and install dependencies"""
+    
+    @staticmethod
+    def check_git() -> Tuple[bool, str]:
+        """Check if Git is installed"""
+        try:
+            result = subprocess.run(['git', '--version'], capture_output=True, text=True)
+            return True, result.stdout.strip()
+        except FileNotFoundError:
+            return False, "Git not found. Please install Git from https://git-scm.com/"
+    
+    @staticmethod
+    def check_ssh() -> Tuple[bool, str]:
+        """Check if SSH is available"""
+        try:
+            subprocess.run(['ssh', '-V'], capture_output=True, text=True)
+            return True, "SSH available"
+        except FileNotFoundError:
+            return False, "SSH not found. Please install OpenSSH."
+    
+    @staticmethod
+    def check_python_deps() -> Tuple[bool, str]:
+        """Check if required Python packages are installed"""
+        try:
+            import git
+            import requests
+            return True, "Python dependencies available"
+        except ImportError as e:
+            return False, f"Missing Python package: {str(e)}. Run: pip install gitpython requests"
+
+class ProgressDialog:
+    """Show progress for long operations"""
+    
+    def __init__(self, parent, title="Processing..."):
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(title)
+        self.dialog.geometry("300x100")
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        
+        # Center the dialog
+        self.dialog.geometry("+%d+%d" % (parent.winfo_rootx() + 50, parent.winfo_rooty() + 50))
+        
+        self.progress = ttk.Progressbar(self.dialog, mode='indeterminate')
+        self.progress.pack(pady=20, padx=20, fill='x')
+        
+        self.label = tk.Label(self.dialog, text="Please wait...")
+        self.label.pack(pady=5)
+        
+        self.progress.start()
+    
+    def update_text(self, text: str):
+        """Update progress text"""
+        self.label.config(text=text)
+        self.dialog.update()
+    
+    def close(self):
+        """Close progress dialog"""
+        self.progress.stop()
+        self.dialog.destroy()
+
+class SetupWizard:
+    """Guided setup wizard"""
+    
+    def __init__(self, parent, app):
+        self.parent = parent
+        self.app = app
+        self.current_step = SetupStep.WELCOME
+        self.window = None
+        self.account_data = {}  # Store account data during setup
+        
+    def start(self):
+        """Start the setup wizard"""
+        self.window = tk.Toplevel(self.parent)
+        self.window.title("GitHub Account Manager Setup")
+        self.window.geometry("500x400")
+        self.window.transient(self.parent)
+        self.window.grab_set()
+        
+        self.show_step()
+    
+    def show_step(self):
+        """Show current setup step"""
+        # Clear window
+        for widget in self.window.winfo_children():
+            widget.destroy()
+        
+        if self.current_step == SetupStep.WELCOME:
+            self.show_welcome()
+        elif self.current_step == SetupStep.DEPENDENCIES:
+            self.show_dependencies()
+        elif self.current_step == SetupStep.SSH_SETUP:
+            self.show_ssh_setup()
+        elif self.current_step == SetupStep.GITHUB_SETUP:
+            self.show_github_setup()
+        elif self.current_step == SetupStep.COMPLETE:
+            self.show_complete()
+    
+    def show_welcome(self):
+        """Show welcome step"""
+        tk.Label(self.window, text="Welcome to GitHub Account Manager", 
+                font=('Arial', 16, 'bold')).pack(pady=20)
+        
+        text = """This wizard will help you set up multiple GitHub accounts with SSH keys.
+
+What you'll need:
+• Git installed on your system
+• GitHub account(s)
+• 5-10 minutes
+
+The wizard will:
+1. Check system dependencies
+2. Generate SSH keys
+3. Configure GitHub accounts
+4. Set up your first repository"""
+        
+        tk.Label(self.window, text=text, justify='left').pack(pady=20, padx=20)
+        
+        button_frame = tk.Frame(self.window)
+        button_frame.pack(pady=20)
+        
+        tk.Button(button_frame, text="Get Started", 
+                 command=self.next_step).pack(side='right', padx=5)
+        tk.Button(button_frame, text="Cancel", 
+                 command=self.window.destroy).pack(side='right', padx=5)
+    
+    def show_dependencies(self):
+        """Check and show dependencies"""
+        tk.Label(self.window, text="Checking Dependencies", 
+                font=('Arial', 16, 'bold')).pack(pady=20)
+        
+        # Check dependencies
+        git_ok, git_msg = DependencyChecker.check_git()
+        ssh_ok, ssh_msg = DependencyChecker.check_ssh()
+        py_ok, py_msg = DependencyChecker.check_python_deps()
+        
+        # Display results
+        results_frame = tk.Frame(self.window)
+        results_frame.pack(pady=20, padx=20, fill='x')
+        
+        self.add_check_result(results_frame, "Git", git_ok, git_msg, 0)
+        self.add_check_result(results_frame, "SSH", ssh_ok, ssh_msg, 1)
+        self.add_check_result(results_frame, "Python Dependencies", py_ok, py_msg, 2)
+        
+        all_ok = git_ok and ssh_ok and py_ok
+        
+        button_frame = tk.Frame(self.window)
+        button_frame.pack(pady=20)
+        
+        if all_ok:
+            tk.Label(self.window, text="✅ All dependencies are ready!", 
+                    fg='green', font=('Arial', 12, 'bold')).pack(pady=10)
+            tk.Button(button_frame, text="Continue", 
+                     command=self.next_step).pack(side='right', padx=5)
+        else:
+            tk.Label(self.window, text="❌ Please install missing dependencies", 
+                    fg='red', font=('Arial', 12, 'bold')).pack(pady=10)
+            tk.Button(button_frame, text="Recheck", 
+                     command=self.show_step).pack(side='right', padx=5)
+        
+        tk.Button(button_frame, text="Back", 
+                 command=self.prev_step).pack(side='right', padx=5)
+    
+    def show_ssh_setup(self):
+        """Show SSH key setup step"""
+        tk.Label(self.window, text="Create Your First Account", 
+                font=('Arial', 16, 'bold')).pack(pady=20)
+        
+        text = """Let's create your first GitHub account with an SSH key.
+
+This will:
+• Generate a secure SSH key pair
+• Configure SSH for GitHub access
+• Set up account-specific authentication"""
+        
+        tk.Label(self.window, text=text, justify='left').pack(pady=10, padx=20)
+        
+        # Account form
+        form_frame = tk.Frame(self.window)
+        form_frame.pack(pady=20, padx=20, fill='x')
+        
+        # Account name
+        tk.Label(form_frame, text="Account Name (e.g., 'personal', 'work'):").grid(row=0, column=0, sticky='w', pady=5)
+        self.account_name_var = tk.StringVar(value="personal")
+        tk.Entry(form_frame, textvariable=self.account_name_var, width=30).grid(row=0, column=1, pady=5, padx=10)
+        
+        # Email
+        tk.Label(form_frame, text="GitHub Email:").grid(row=1, column=0, sticky='w', pady=5)
+        self.email_var = tk.StringVar()
+        tk.Entry(form_frame, textvariable=self.email_var, width=30).grid(row=1, column=1, pady=5, padx=10)
+        
+        # GitHub username
+        tk.Label(form_frame, text="GitHub Username:").grid(row=2, column=0, sticky='w', pady=5)
+        self.username_var = tk.StringVar()
+        tk.Entry(form_frame, textvariable=self.username_var, width=30).grid(row=2, column=1, pady=5, padx=10)
+        
+        button_frame = tk.Frame(self.window)
+        button_frame.pack(pady=20)
+        
+        tk.Button(button_frame, text="Create Account", 
+                 command=self.create_account).pack(side='right', padx=5)
+        tk.Button(button_frame, text="Back", 
+                 command=self.prev_step).pack(side='right', padx=5)
+    
+    def show_github_setup(self):
+        """Show GitHub setup instructions"""
+        tk.Label(self.window, text="Add SSH Key to GitHub", 
+                font=('Arial', 16, 'bold')).pack(pady=20)
+        
+        if 'account_name' in self.account_data:
+            account_name = self.account_data['account_name']
+            
+            text = f"""Your SSH key has been generated for account '{account_name}'.
+
+Next steps:
+1. Copy the public key below
+2. Go to GitHub.com → Settings → SSH and GPG keys
+3. Click "New SSH key"
+4. Paste the key and save
+
+Your public key:"""
+            
+            tk.Label(self.window, text=text, justify='left').pack(pady=10, padx=20)
+            
+            # Public key display
+            key_frame = tk.Frame(self.window)
+            key_frame.pack(pady=10, padx=20, fill='both', expand=True)
+            
+            key_text = tk.Text(key_frame, height=4, width=60, wrap=tk.WORD)
+            key_text.pack(fill='both', expand=True)
+            
+            # Load and display public key
+            try:
+                ssh_dir = os.path.expanduser("~/.ssh")
+                key_path = os.path.join(ssh_dir, f"{account_name}.pub")
+                with open(key_path, 'r') as f:
+                    public_key = f.read()
+                    key_text.insert('1.0', public_key)
+                    # Copy to clipboard
+                    self.window.clipboard_clear()
+                    self.window.clipboard_append(public_key)
+            except Exception as e:
+                key_text.insert('1.0', f"Error reading public key: {e}")
+            
+            key_text.config(state='disabled')
+            
+            tk.Label(self.window, text="✅ Public key copied to clipboard!", 
+                    fg='green').pack(pady=5)
+        
+        button_frame = tk.Frame(self.window)
+        button_frame.pack(pady=20)
+        
+        def open_github():
+            webbrowser.open("https://github.com/settings/keys")
+        
+        tk.Button(button_frame, text="Open GitHub SSH Settings", 
+                 command=open_github).pack(side='left', padx=5)
+        tk.Button(button_frame, text="I've Added the Key", 
+                 command=self.next_step).pack(side='right', padx=5)
+        tk.Button(button_frame, text="Back", 
+                 command=self.prev_step).pack(side='right', padx=5)
+    
+    def show_complete(self):
+        """Show completion step"""
+        tk.Label(self.window, text="Setup Complete! 🎉", 
+                font=('Arial', 16, 'bold'), fg='green').pack(pady=20)
+        
+        if 'account_name' in self.account_data:
+            account_name = self.account_data['account_name']
+            
+            text = f"""Congratulations! Your account '{account_name}' is ready to use.
+
+What's been set up:
+✅ SSH key generated and configured
+✅ Account added to the application
+✅ Ready for repository management
+
+Next steps:
+• Test the SSH connection
+• Configure your first repository
+• Start coding with confidence!
+
+You can always run this wizard again from Settings."""
+            
+            tk.Label(self.window, text=text, justify='left').pack(pady=20, padx=20)
+        
+        button_frame = tk.Frame(self.window)
+        button_frame.pack(pady=20)
+        
+        def test_connection():
+            if 'account_name' in self.account_data:
+                account_name = self.account_data['account_name']
+                try:
+                    cmd = ["ssh", "-T", f"git@github.com-{account_name}"]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if "successfully authenticated" in result.stderr:
+                        messagebox.showinfo("Success", "SSH connection test passed!")
+                    else:
+                        messagebox.showwarning("Test Failed", 
+                                              "SSH test failed. Please check that you've added the public key to GitHub.")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Connection test failed: {e}")
+        
+        tk.Button(button_frame, text="Test SSH Connection", 
+                 command=test_connection).pack(side='left', padx=5)
+        tk.Button(button_frame, text="Finish", 
+                 command=self.finish_setup).pack(side='right', padx=5)
+    
+    def create_account(self):
+        """Create account with SSH key"""
+        print("DEBUG: Create account button clicked")  # Debug output
+        
+        account_name = self.account_name_var.get().strip()
+        email = self.email_var.get().strip()
+        username = self.username_var.get().strip()
+        
+        print(f"DEBUG: Account details - Name: {account_name}, Email: {email}, Username: {username}")
+        
+        # Validate inputs
+        if not account_name or not email or not username:
+            print("DEBUG: Validation failed - missing fields")
+            messagebox.showerror("Error", "Please fill in all fields")
+            return
+        
+        print("DEBUG: Starting input validation")
+        if not self.validate_inputs(
+            account_name=account_name,
+            email=email,
+            github_username=username
+        ):
+            print("DEBUG: Input validation failed")
+            return
+        
+        print("DEBUG: Input validation passed")
+        
+        # Store account data
+        self.account_data = {
+            'account_name': account_name,
+            'email': email,
+            'username': username
+        }
+        
+        print("DEBUG: Starting async key generation")
+        # Run SSH key generation asynchronously
+        self.run_async_key_generation()
+    
+    def run_async_key_generation(self):
+        """Run SSH key generation in background"""
+        # Show progress dialog
+        progress = ProgressDialog(self.window, "Generating SSH Key...")
+        progress.update_text("Creating SSH key pair...")
+        
+        def generate_key():
+            print("DEBUG: Starting SSH key generation")
+            account_name = self.account_data['account_name']
+            email = self.account_data['email']
+            username = self.account_data['username']
+            
+            # Generate SSH key
+            ssh_dir = os.path.expanduser("~/.ssh")
+            print(f"DEBUG: SSH directory: {ssh_dir}")
+            os.makedirs(ssh_dir, exist_ok=True)
+            
+            key_path = os.path.join(ssh_dir, account_name)
+            print(f"DEBUG: Key path: {key_path}")
+            
+            # Check if key already exists
+            if os.path.exists(key_path):
+                raise Exception(f"SSH key already exists: {key_path}")
+            
+            cmd = [
+                "ssh-keygen",
+                "-t", "ed25519",
+                "-C", email,
+                "-f", key_path,
+                "-N", ""  # No passphrase for simplicity
+            ]
+            
+            print(f"DEBUG: Running command: {' '.join(cmd)}")
+            
+            # Run with timeout to prevent hanging
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
+            print(f"DEBUG: SSH key generation completed successfully")
+            
+            # Try to add to SSH agent (optional, don't fail if it doesn't work)
+            try:
+                print("DEBUG: Attempting to add key to SSH agent")
+                # First try to start SSH agent on Windows
+                if platform.system() == "Windows":
+                    try:
+                        subprocess.run(["powershell", "-Command", "Start-Service ssh-agent"], 
+                                     check=False, capture_output=True, text=True, timeout=10)
+                    except:
+                        pass
+                
+                # Add key to agent
+                subprocess.run(["ssh-add", key_path], check=False, capture_output=True, text=True, timeout=10)
+                print("DEBUG: Key added to SSH agent successfully")
+            except Exception as e:
+                print(f"DEBUG: SSH agent operation failed (this is optional): {e}")
+                pass  # SSH agent operations are optional
+            
+            return key_path
+        
+        def on_success(key_path):
+            print("DEBUG: Key generation successful, updating app")
+            progress.close()
+            
+            # Create account object and add to app
+            account = Account(
+                name=self.account_data['account_name'],
+                email=self.account_data['email'],
+                ssh_key_path=key_path,
+                github_username=self.account_data['username']
+            )
+            
+            self.app.accounts[self.account_data['account_name']] = account
+            self.app.update_ssh_config(account)
+            self.app.save_config()
+            
+            # Move to next step
+            self.next_step()
+        
+        def on_error(error):
+            print(f"DEBUG: Key generation failed: {error}")
+            progress.close()
+            
+            # Show error with fallback option
+            result = messagebox.askyesno(
+                "SSH Key Generation Failed", 
+                f"Failed to create SSH key:\n{str(error)}\n\n"
+                "Would you like to continue anyway?\n"
+                "You can generate the SSH key manually later."
+            )
+            
+            if result:
+                # Create account without SSH key for now
+                self.create_account_without_ssh()
+            # If user chooses "No", just stay on current step
+        
+        # Run in background thread
+        thread = threading.Thread(target=self.run_key_generation_thread, args=(generate_key, on_success, on_error))
+        thread.daemon = True
+        thread.start()
+    
+    def create_account_without_ssh(self):
+        """Create account without SSH key as fallback"""
+        print("DEBUG: Creating account without SSH key")
+        try:
+            # Create a placeholder key path
+            ssh_dir = os.path.expanduser("~/.ssh")
+            key_path = os.path.join(ssh_dir, self.account_data['account_name'])
+            
+            # Create account object
+            account = Account(
+                name=self.account_data['account_name'],
+                email=self.account_data['email'],
+                ssh_key_path=key_path,  # Will be generated later
+                github_username=self.account_data['username']
+            )
+            
+            self.app.accounts[self.account_data['account_name']] = account
+            self.app.save_config()
+            
+            messagebox.showinfo(
+                "Account Created", 
+                f"Account '{self.account_data['account_name']}' created successfully.\n\n"
+                "You'll need to generate an SSH key manually:\n"
+                f"ssh-keygen -t ed25519 -C {self.account_data['email']} -f {key_path}"
+            )
+            
+            # Skip to completion
+            self.current_step = SetupStep.COMPLETE
+            self.show_step()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create account: {e}")
+    
+    def run_key_generation_thread(self, generate_key, on_success, on_error):
+        """Run key generation in thread"""
+        try:
+            result = generate_key()
+            self.window.after(0, lambda: on_success(result))
+        except Exception as e:
+            self.window.after(0, lambda: on_error(e))
+    
+    def validate_inputs(self, **kwargs):
+        """Validate wizard inputs"""
+        try:
+            for field, value in kwargs.items():
+                if field == "email":
+                    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+                    if not re.match(pattern, value):
+                        raise Exception(f"Invalid email format: {value}")
+                elif field == "github_username":
+                    pattern = r'^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$'
+                    if not re.match(pattern, value):
+                        raise Exception(f"Invalid GitHub username: {value}")
+                elif field == "account_name":
+                    pattern = r'^[a-zA-Z0-9\-_]+$'
+                    if not re.match(pattern, value) or len(value) == 0:
+                        raise Exception(f"Invalid account name: {value}")
+            return True
+        except Exception as e:
+            messagebox.showerror("Validation Error", str(e))
+            return False
+    
+    def finish_setup(self):
+        """Finish setup and close wizard"""
+        # Refresh the main app
+        if hasattr(self.app, 'refresh_accounts_list'):
+            self.app.refresh_accounts_list()
+        
+        messagebox.showinfo("Welcome!", 
+                           "Setup complete! You can now manage your repositories and accounts.")
+        self.window.destroy()
+    
+    def add_check_result(self, parent, name, success, message, row):
+        """Add dependency check result"""
+        icon = "✅" if success else "❌"
+        color = "green" if success else "red"
+        
+        tk.Label(parent, text=f"{icon} {name}", fg=color).grid(row=row, column=0, sticky='w', pady=2)
+        tk.Label(parent, text=message, fg='gray').grid(row=row, column=1, sticky='w', padx=10, pady=2)
+    
+    def next_step(self):
+        """Go to next step"""
+        steps = list(SetupStep)
+        current_index = steps.index(self.current_step)
+        if current_index < len(steps) - 1:
+            self.current_step = steps[current_index + 1]
+            self.show_step()
+    
+    def prev_step(self):
+        """Go to previous step"""
+        steps = list(SetupStep)
+        current_index = steps.index(self.current_step)
+        if current_index > 0:
+            self.current_step = steps[current_index - 1]
+            self.show_step()
+
+class ImprovedGitHubAccountManager:
+    """Improved GitHub Account Manager with better UX"""
+    
     def __init__(self, root):
         self.root = root
         self.root.title("GitHub Account Manager")
+        self.root.geometry("800x600")
+        
+        # Initialize paths and data
         self.ssh_config_path = os.path.expanduser("~/.ssh/config")
         self.ssh_dir = os.path.expanduser("~/.ssh")
-        self.configs_dir = os.path.join(os.path.dirname(__file__), "configs")
         self.config_file = os.path.join(os.path.dirname(__file__), "config.json")
-        os.makedirs(self.configs_dir, exist_ok=True)
-        self.accounts = self.load_ssh_configs()
-        self.keys = self.detect_ssh_keys()
-        self.repos = []
-        self.owner_to_account = {}  # Map GitHub owners to account hosts
-        self.account_emails = {}  # Map accounts to their emails
-
-        # Load last scanned path
-        self.last_scanned_path = self.load_last_scanned_path()
-
-        # Print and save SSH configs and keys
-        self.print_and_save_ssh_configs()
-
-        # GUI Elements
+        
+        # Data storage
+        self.accounts: Dict[str, Account] = {}
+        self.repos: List[Tuple] = []
+        self.last_scanned_path = ""
+        
+        # Load configuration
+        self.load_config()
+        
+        # Setup GUI
         self.setup_gui()
-
-    def load_last_scanned_path(self):
-        """Load the last scanned folder path from config.json."""
+        
+        # Show welcome message for first-time users
+        if not self.accounts:
+            self.show_welcome_message()
+    
+    def show_welcome_message(self):
+        """Show welcome message for first-time users"""
+        result = messagebox.askyesno(
+            "Welcome to GitHub Account Manager",
+            "Welcome! It looks like this is your first time using the GitHub Account Manager.\n\n"
+            "Would you like to run the setup wizard to create your first account?\n\n"
+            "You can also do this later from the Accounts tab."
+        )
+        
+        if result:
+            self.show_setup_wizard()
+    
+    def show_setup_wizard(self):
+        """Show setup wizard for first-time users"""
+        wizard = SetupWizard(self.root, self)
+        wizard.start()
+    
+    def load_config(self):
+        """Load application configuration"""
         try:
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r') as f:
                     config = json.load(f)
-                    return config.get("last_scanned_path", "")
+                    self.last_scanned_path = config.get("last_scanned_path", "")
+                    
+                    # Load accounts
+                    accounts_data = config.get("accounts", {})
+                    for name, data in accounts_data.items():
+                        self.accounts[name] = Account(
+                            name=data["name"],
+                            email=data["email"],
+                            ssh_key_path=data["ssh_key_path"],
+                            github_username=data.get("github_username"),
+                            token=data.get("token")
+                        )
         except Exception as e:
-            print(f"Error loading config: {e}")
-        return ""
-
-    def save_last_scanned_path(self, path):
-        """Save the last scanned folder path to config.json."""
+            self.show_error(f"Error loading configuration: {e}")
+    
+    def save_config(self):
+        """Save application configuration"""
         try:
-            config = {"last_scanned_path": path}
+            config = {
+                "last_scanned_path": self.last_scanned_path,
+                "accounts": {}
+            }
+            
+            for name, account in self.accounts.items():
+                config["accounts"][name] = {
+                    "name": account.name,
+                    "email": account.email,
+                    "ssh_key_path": account.ssh_key_path,
+                    "github_username": account.github_username,
+                    "token": account.token
+                }
+            
             with open(self.config_file, 'w') as f:
-                json.dump(config, f, indent=4)
+                json.dump(config, f, indent=2)
         except Exception as e:
-            print(f"Error saving config: {e}")
-
-    def detect_ssh_keys(self):
-        """Detect private SSH keys in ~/.ssh directory."""
-        keys = []
-        if not os.path.exists(self.ssh_dir):
-            return keys
-        for file in os.listdir(self.ssh_dir):
-            file_path = os.path.join(self.ssh_dir, file)
-            if (os.path.isfile(file_path) and
-                not file.endswith('.pub') and
-                not file.startswith('known_hosts') and
-                file not in ['config', 'authorized_keys']):
-                keys.append(file_path)
-        return keys
-
-    def print_and_save_ssh_configs(self):
-        """Print and save SSH config and key information."""
-        print("\n=== SSH Private Keys ===")
-        if self.keys:
-            for key in self.keys:
-                print(f"Key: {key}")
+            self.show_error(f"Error saving configuration: {e}")
+    
+    def show_error(self, message: str, title: str = "Error"):
+        """Show user-friendly error message"""
+        messagebox.showerror(title, message)
+    
+    def show_success(self, message: str, title: str = "Success"):
+        """Show success message"""
+        messagebox.showinfo(title, message)
+    
+    def show_info(self, message: str, title: str = "Information"):
+        """Show information message"""
+        messagebox.showinfo(title, message)
+    
+    def validate_inputs(self, **kwargs) -> bool:
+        """Validate multiple inputs"""
+        try:
+            for field, value in kwargs.items():
+                if field == "email":
+                    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+                    if not re.match(pattern, value):
+                        raise Exception(f"Invalid email format: {value}")
+                elif field == "github_username":
+                    pattern = r'^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$'
+                    if not re.match(pattern, value):
+                        raise Exception(f"Invalid GitHub username: {value}")
+                elif field == "account_name":
+                    pattern = r'^[a-zA-Z0-9\-_]+$'
+                    if not re.match(pattern, value) or len(value) == 0:
+                        raise Exception(f"Invalid account name: {value}")
+                elif field == "repo_name":
+                    pattern = r'^[a-zA-Z0-9._-]+$'
+                    if not re.match(pattern, value) or len(value) == 0:
+                        raise Exception(f"Invalid repository name: {value}")
+            return True
+        except Exception as e:
+            self.show_error(str(e), "Validation Error")
+            return False
+    
+    def run_async_operation(self, operation, success_callback=None, error_callback=None):
+        """Run operation in background with progress dialog"""
+        progress = ProgressDialog(self.root, "Processing...")
+        
+        def run_operation():
+            try:
+                result = operation()
+                self.root.after(0, lambda: self.handle_async_success(progress, result, success_callback))
+            except Exception as e:
+                self.root.after(0, lambda: self.handle_async_error(progress, e, error_callback))
+        
+        thread = threading.Thread(target=run_operation)
+        thread.daemon = True
+        thread.start()
+    
+    def handle_async_success(self, progress, result, callback):
+        """Handle successful async operation"""
+        progress.close()
+        if callback:
+            callback(result)
+    
+    def handle_async_error(self, progress, error, callback):
+        """Handle failed async operation"""
+        progress.close()
+        if callback:
+            callback(error)
         else:
-            print("No private keys found in ~/.ssh")
-
-        print("\n=== ~/.ssh/config Contents ===")
-        if os.path.exists(self.ssh_config_path):
-            with open(self.ssh_config_path, 'r') as f:
-                content = f.read()
-                print(content)
-                # Save to configs folder
-                ssh_config_output = os.path.join(self.configs_dir, "ssh_config.txt")
-                with open(ssh_config_output, 'w') as f_out:
-                    f_out.write(content)
-        else:
-            print("No ~/.ssh/config file found")
-            # Write empty file to indicate no config
-            ssh_config_output = os.path.join(self.configs_dir, "ssh_config.txt")
-            with open(ssh_config_output, 'w') as f_out:
-                f_out.write("")
-
-    def load_ssh_configs(self):
-        """Load GitHub SSH configurations from ~/.ssh/config."""
-        accounts = {}
-        if not os.path.exists(self.ssh_config_path):
-            return accounts
-        with open(self.ssh_config_path, 'r') as f:
-            content = f.read()
-            # Match Host blocks for github.com-*
-            pattern = r'Host github\.com-(\S+)\s*\n\s*HostName github\.com\s*\n\s*User git\s*\n\s*IdentityFile (\S+)'
-            matches = re.findall(pattern, content, re.MULTILINE)
-            for host, identity_file in matches:
-                accounts[host] = identity_file
-        return accounts
-
-    def save_ssh_config(self, host, identity_file):
-        """Add or update a SSH configuration in ~/.ssh/config."""
-        os.makedirs(os.path.dirname(self.ssh_config_path), exist_ok=True)
-        # Read existing config
-        if os.path.exists(self.ssh_config_path):
-            with open(self.ssh_config_path, 'r') as f:
-                content = f.readlines()
-        else:
-            content = []
-        # Remove existing block for this host, if any
-        new_content = []
-        skip = False
-        host_line = f"Host github.com-{host}\n"
-        for line in content:
-            if line.strip() == host_line.strip():
-                skip = True
-                continue
-            if skip and not line.strip().startswith('Host '):
-                continue
-            skip = False
-            new_content.append(line)
-        # Append new config
-        config_entry = f"\n# {host} account\nHost github.com-{host}\n    HostName github.com\n    User git\n    IdentityFile {identity_file}\n"
-        new_content.append(config_entry)
-        with open(self.ssh_config_path, 'w') as f:
-            f.writelines(new_content)
-        self.accounts[host] = identity_file
-        # Update GUI
-        self.account_var.set("Select Account")
-        self.account_menu['menu'].delete(0, 'end')
-        for account in self.accounts.keys():
-            self.account_menu['menu'].add_command(label=account, command=tk._setit(self.account_var, account))
-        self.update_key_list()
-        # Save updated SSH config
-        self.print_and_save_ssh_configs()
-
-    def delete_ssh_config(self):
-        """Delete a selected SSH configuration from ~/.ssh/config."""
-        selected = self.key_list.curselection()
-        if not selected:
-            messagebox.showerror("Error", "Please select a key configuration")
-            return
-        key_path = self.key_list.get(selected[0]).split(' -> ')[0]
-        host = None
-        for h, path in self.accounts.items():
-            if path == key_path:
-                host = h
-                break
-        if not host:
-            messagebox.showinfo("Info", "Key is not associated with any GitHub account")
-            return
-        if not messagebox.askyesno("Confirm", f"Delete configuration for github.com-{host}?"):
-            return
-        # Read and filter out the host block
-        with open(self.ssh_config_path, 'r') as f:
-            content = f.readlines()
-        new_content = []
-        skip = False
-        host_line = f"Host github.com-{host}\n"
-        for line in content:
-            if line.strip() == host_line.strip():
-                skip = True
-                continue
-            if skip and not line.strip().startswith('Host '):
-                continue
-            skip = False
-            new_content.append(line)
-        with open(self.ssh_config_path, 'w') as f:
-            f.writelines(new_content)
-        # Remove email mapping
-        if host in self.account_emails:
-            del self.account_emails[host]
-        del self.accounts[host]
-        # Update GUI
-        self.account_var.set("Select Account")
-        self.account_menu['menu'].delete(0, 'end')
-        for account in self.accounts.keys():
-            self.account_menu['menu'].add_command(label=account, command=tk._setit(self.account_var, account))
-        self.update_key_list()
-        # Save updated SSH config
-        self.print_and_save_ssh_configs()
-        messagebox.showinfo("Success", f"Deleted configuration for github.com-{host}")
-
-    def edit_ssh_config(self):
-        """Edit the selected SSH configuration."""
-        selected = self.key_list.curselection()
-        if not selected:
-            messagebox.showerror("Error", "Please select a key configuration")
-            return
-        key_path = self.key_list.get(selected[0]).split(' -> ')[0]
-        host = None
-        for h, path in self.accounts.items():
-            if path == key_path:
-                host = h
-                break
-        if not host:
-            messagebox.showinfo("Info", "Key is not associated with any GitHub account")
-            return
-        # Open a dialog to edit host and key
-        edit_window = tk.Toplevel(self.root)
-        edit_window.title("Edit SSH Configuration")
-        tk.Label(edit_window, text="Host (e.g., joshua-personal):").grid(row=0, column=0, padx=5, pady=5)
-        host_entry = tk.Entry(edit_window, width=20)
-        host_entry.grid(row=0, column=1, padx=5, pady=5)
-        host_entry.insert(0, host)
-        tk.Label(edit_window, text="Identity File:").grid(row=1, column=0, padx=5, pady=5)
-        key_var = tk.StringVar(edit_window)
-        key_var.set(key_path)
-        key_menu = tk.OptionMenu(edit_window, key_var, *self.keys)
-        key_menu.grid(row=1, column=1, padx=5, pady=5)
-        tk.Label(edit_window, text="Email:").grid(row=2, column=0, padx=5, pady=5)
-        email_entry = tk.Entry(edit_window, width=30)
-        email_entry.grid(row=2, column=1, padx=5, pady=5)
-        email_entry.insert(0, self.account_emails.get(host, ""))
-        def save_edit():
-            new_host = host_entry.get()
-            new_key = key_var.get()
-            new_email = email_entry.get().strip()
-            if not new_host or not new_key:
-                messagebox.showerror("Error", "Please enter both host and identity file")
-                return
-            if not os.path.exists(new_key):
-                messagebox.showerror("Error", "Identity file does not exist")
-                return
-            if not new_email:
-                messagebox.showerror("Error", "Please enter an email")
-                return
-            # Delete old config
-            with open(self.ssh_config_path, 'r') as f:
-                content = f.readlines()
-            new_content = []
-            skip = False
-            host_line = f"Host github.com-{host}\n"
-            for line in content:
-                if line.strip() == host_line.strip():
-                    skip = True
-                    continue
-                if skip and not line.strip().startswith('Host '):
-                    continue
-                skip = False
-                new_content.append(line)
-            # Add new config
-            config_entry = f"\n# {new_host} account\nHost github.com-{new_host}\n    HostName github.com\n    User git\n    IdentityFile {new_key}\n"
-            new_content.append(config_entry)
-            with open(self.ssh_config_path, 'w') as f:
-                f.writelines(new_content)
-            # Update email mapping
-            if host in self.account_emails:
-                del self.account_emails[host]
-            self.account_emails[new_host] = new_email
-            del self.accounts[host]
-            self.accounts[new_host] = new_key
-            # Update GUI
-            self.account_var.set("Select Account")
-            self.account_menu['menu'].delete(0, 'end')
-            for account in self.accounts.keys():
-                self.account_menu['menu'].add_command(label=account, command=tk._setit(self.account_var, account))
-            self.update_key_list()
-            # Save updated SSH config
-            self.print_and_save_ssh_configs()
-            messagebox.showinfo("Success", f"Updated configuration for github.com-{new_host}")
-            edit_window.destroy()
-        tk.Button(edit_window, text="Save", command=save_edit).grid(row=3, column=0, columnspan=2, pady=5)
-
-    def generate_ssh_key(self):
-        """Generate a new Ed25519 SSH key."""
-        gen_window = tk.Toplevel(self.root)
-        gen_window.title("Generate SSH Key")
-        gen_window.geometry("400x250")
+            self.show_error(f"Operation failed: {str(error)}")
+    
+    def create_account_wizard(self):
+        """Show account creation wizard"""
+        wizard = tk.Toplevel(self.root)
+        wizard.title("Create New Account")
+        wizard.geometry("400x300")
+        wizard.transient(self.root)
+        wizard.grab_set()
         
-        tk.Label(gen_window, text="Key Name (e.g., joshua-personal):").grid(row=0, column=0, padx=5, pady=5)
-        key_name_entry = tk.Entry(gen_window, width=30)
-        key_name_entry.grid(row=0, column=1, padx=5, pady=5)
-        key_name_entry.insert(0, "joshua-personal")
+        # Form fields
+        fields = {}
         
-        tk.Label(gen_window, text="Email (e.g., joshua@personal.com):").grid(row=1, column=0, padx=5, pady=5)
-        email_entry = tk.Entry(gen_window, width=30)
-        email_entry.grid(row=1, column=1, padx=5, pady=5)
-        email_entry.insert(0, "joshua@personal.com")
+        tk.Label(wizard, text="Create New GitHub Account", 
+                font=('Arial', 14, 'bold')).pack(pady=10)
         
-        tk.Label(gen_window, text="Passphrase (leave blank for none):").grid(row=2, column=0, padx=5, pady=5)
-        passphrase_entry = tk.Entry(gen_window, width=30, show="*")
-        passphrase_entry.grid(row=2, column=1, padx=5, pady=5)
+        form_frame = tk.Frame(wizard)
+        form_frame.pack(pady=20, padx=20, fill='both')
         
-        def do_generate():
-            key_name = key_name_entry.get().strip()
-            email = email_entry.get().strip()
-            passphrase = passphrase_entry.get().strip()
+        # Account name
+        tk.Label(form_frame, text="Account Name:").grid(row=0, column=0, sticky='w', pady=5)
+        fields['name'] = tk.Entry(form_frame, width=30)
+        fields['name'].grid(row=0, column=1, pady=5, padx=10)
+        
+        # Email
+        tk.Label(form_frame, text="Email:").grid(row=1, column=0, sticky='w', pady=5)
+        fields['email'] = tk.Entry(form_frame, width=30)
+        fields['email'].grid(row=1, column=1, pady=5, padx=10)
+        
+        # GitHub username
+        tk.Label(form_frame, text="GitHub Username:").grid(row=2, column=0, sticky='w', pady=5)
+        fields['github_username'] = tk.Entry(form_frame, width=30)
+        fields['github_username'].grid(row=2, column=1, pady=5, padx=10)
+        
+        # Buttons
+        button_frame = tk.Frame(wizard)
+        button_frame.pack(pady=20)
+        
+        def create_account():
+            # Validate inputs
+            name = fields['name'].get().strip()
+            email = fields['email'].get().strip()
+            github_username = fields['github_username'].get().strip()
             
-            if not key_name or not email:
-                messagebox.showerror("Error", "Key name and email are required")
+            if not self.validate_inputs(
+                account_name=name,
+                email=email,
+                github_username=github_username
+            ):
                 return
-                
-            key_path = os.path.join(self.ssh_dir, key_name)
+            
+            # Check if account already exists
+            if name in self.accounts:
+                self.show_error(f"Account '{name}' already exists")
+                return
+            
+            wizard.destroy()
+            self.create_account_with_ssh_key(name, email, github_username)
+        
+        tk.Button(button_frame, text="Create Account", 
+                 command=create_account).pack(side='right', padx=5)
+        tk.Button(button_frame, text="Cancel", 
+                 command=wizard.destroy).pack(side='right', padx=5)
+        
+        # Focus on first field
+        fields['name'].focus()
+    
+    def create_account_with_ssh_key(self, name: str, email: str, github_username: str):
+        """Create account and generate SSH key"""
+        def generate_key():
+            # Generate SSH key
+            key_path = os.path.join(self.ssh_dir, name)
+            
             if os.path.exists(key_path):
-                messagebox.showerror("Error", f"Key {key_path} already exists")
-                return
-                
-            try:
-                # Ensure ~/.ssh exists
-                os.makedirs(self.ssh_dir, exist_ok=True)
-                
-                # Generate key
-                cmd = [
-                    "ssh-keygen",
-                    "-t", "ed25519",
-                    "-C", email,
-                    "-f", key_path,
-                    "-N", passphrase
-                ]
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
-                
-                # Start SSH agent and add key
-                if platform.system() == "Windows":
-                    subprocess.run(["powershell", "-Command", "Start-Service ssh-agent"], check=True)
-                    subprocess.run(["ssh-add", key_path], check=True, capture_output=True, text=True)
-                else:
-                    subprocess.run(["eval", "$(ssh-agent -s)"], shell=True, check=True)
-                    subprocess.run(["ssh-add", key_path], check=True, capture_output=True, text=True)
-                
-                # Store the email for this account
-                self.account_emails[key_name] = email
-                
-                # Refresh key list
-                self.keys = self.detect_ssh_keys()
-                self.update_key_list()
-                self.key_var.set("Select Key")
-                key_menu = tk.OptionMenu(self.root, self.key_var, "Select Key", *self.keys)
-                key_menu.grid(row=8, column=1, padx=5, pady=5)
-                
-                messagebox.showinfo("Success", f"Generated key {key_path}\nPublic key: {key_path}.pub\nAdd the public key to your GitHub account.")
-                gen_window.destroy()
-                
-            except subprocess.CalledProcessError as e:
-                messagebox.showerror("Error", f"Failed to generate key: {e.stderr}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Unexpected error: {str(e)}")
-        
-        tk.Button(gen_window, text="Generate", command=do_generate).grid(row=3, column=0, columnspan=2, pady=10)
-        tk.Button(gen_window, text="Cancel", command=gen_window.destroy).grid(row=4, column=0, columnspan=2, pady=5)
-
-    def open_ssh_folder(self):
-        """Open the SSH key directory in File Explorer."""
-        try:
-            if os.path.exists(self.ssh_dir):
-                os.startfile(self.ssh_dir)
-            else:
-                messagebox.showerror("Error", f"SSH directory {self.ssh_dir} does not exist")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to open SSH directory: {str(e)}")
-
-    def create_github_repo(self, owner, repo_name, token):
-        """Create a GitHub repository using the API."""
-        if not token:
-            return False, "GitHub token required"
-        url = f"https://api.github.com/user/repos"
-        headers = {
-            "Authorization": f"token {token}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        data = {
-            "name": repo_name,
-            "private": False  # Change to True for private repo
-        }
-        try:
-            response = requests.post(url, headers=headers, json=data)
-            if response.status_code == 201:
-                return True, "Repository created successfully"
-            elif response.status_code == 422:
-                return False, "Repository already exists or invalid name"
-            else:
-                return False, f"Failed to create repository: {response.json().get('message', 'Unknown error')}"
-        except Exception as e:
-            return False, f"Error creating repository: {str(e)}"
-
-    def configure_new_project(self):
-        """Configure a new project with no remote."""
-        selected = self.repo_list.curselection()
-        if not selected:
-            messagebox.showerror("Error", "Please select a repository")
-            return
-        repo_path, account, _, _, email, protocol = self.repos[selected[0]]
-        if account != "New Project (No Remote)":
-            messagebox.showerror("Error", "Selected repository already has a remote")
-            return
-        
-        config_window = tk.Toplevel(self.root)
-        config_window.title("Configure New Project")
-        config_window.geometry("400x300")
-        
-        tk.Label(config_window, text="GitHub Owner (e.g., josh-mds):").grid(row=0, column=0, padx=5, pady=5)
-        owner_entry = tk.Entry(config_window, width=30)
-        owner_entry.grid(row=0, column=1, padx=5, pady=5)
-        owner_entry.insert(0, "josh-mds")
-        
-        tk.Label(config_window, text="Repository Name (e.g., new-project):").grid(row=1, column=0, padx=5, pady=5)
-        repo_name_entry = tk.Entry(config_window, width=30)
-        repo_name_entry.grid(row=1, column=1, padx=5, pady=5)
-        repo_name_entry.insert(0, os.path.basename(repo_path))
-        
-        tk.Label(config_window, text="Select Account:").grid(row=2, column=0, padx=5, pady=5)
-        account_var = tk.StringVar(config_window)
-        account_var.set("joshua-personal" if "joshua-personal" in self.accounts else "Select Account")
-        account_menu = tk.OptionMenu(config_window, account_var, "Select Account", *self.accounts.keys())
-        account_menu.grid(row=2, column=1, padx=5, pady=5)
-        
-        tk.Label(config_window, text="GitHub Token (optional, for auto-create):").grid(row=3, column=0, padx=5, pady=5)
-        token_entry = tk.Entry(config_window, width=30, show="*")
-        token_entry.grid(row=3, column=1, padx=5, pady=5)
-        
-        def do_configure():
-            owner = owner_entry.get().strip()
-            repo_name = repo_name_entry.get().strip()
-            account = account_var.get().strip()
-            token = token_entry.get().strip()
+                raise Exception(f"SSH key already exists: {key_path}")
             
-            if not owner or not repo_name or not account or account == "Select Account":
-                messagebox.showerror("Error", "Owner, repository name, and account are required")
-                return
-                
+            os.makedirs(self.ssh_dir, exist_ok=True)
+            
+            cmd = [
+                "ssh-keygen",
+                "-t", "ed25519",
+                "-C", email,
+                "-f", key_path,
+                "-N", ""  # No passphrase for simplicity
+            ]
+            
+            # Run with timeout to prevent hanging
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
+            
+            # Try to add to SSH agent (optional)
             try:
-                repo = Repo(repo_path)
-                # Create remote
-                remote_url = f"git@github.com-{account}:{owner}/{repo_name}.git"
-                repo.create_remote("origin", remote_url)
+                # Start SSH agent on Windows if needed
+                if platform.system() == "Windows":
+                    try:
+                        subprocess.run(["powershell", "-Command", "Start-Service ssh-agent"], 
+                                     check=False, capture_output=True, text=True, timeout=10)
+                    except:
+                        pass
                 
-                # Set user config, always use the email associated with the account
-                account_email = self.account_emails.get(account, f"{account}@personal.com")
-                with repo.config_writer() as config:
-                    config.set_value("user", "name", account)
-                    config.set_value("user", "email", account_email)
-                
-                # Save repo config
-                config_path = os.path.join(repo.working_dir, '.git', 'config')
-                print(f"\n=== Git Config for {repo.working_dir} ===")
-                with open(config_path, 'r') as f:
-                    content = f.read()
-                    print(content)
-                    repo_name_safe = repo.working_dir.replace(os.sep, '_').replace(':', '_').strip('_')
-                    config_output = os.path.join(self.configs_dir, f"{repo_name_safe}_config.txt")
-                    with open(config_output, 'w') as f_out:
-                        f_out.write(content)
-                
-                # Update owner mapping
-                self.owner_to_account[owner] = account
-                
-                # Create GitHub repo if token provided
-                if token:
-                    success, message = self.create_github_repo(owner, repo_name, token)
-                    if not success:
-                        messagebox.showerror("Error", message)
-                        config_window.destroy()
-                        self.scan_repos()
-                        return
-                
-                # Refresh repo list
-                self.scan_repos()
-                
-                # Provide instructions
-                instructions = f"Configured {repo_path} for {account}\nRemote URL: {remote_url}\n"
-                if token:
-                    instructions += f"Repository created on GitHub.\nPush your project:\ncd {repo_path}\ngit add .\ngit commit -m 'Initial commit'\ngit push -u origin main"
-                else:
-                    instructions += f"Create the repository on GitHub at https://github.com/{owner}/{repo_name}\nThen push:\ncd {repo_path}\ngit add .\ngit commit -m 'Initial commit'\ngit push -u origin main"
-                messagebox.showinfo("Success", instructions)
-                config_window.destroy()
-                
+                # Add key to agent
+                subprocess.run(["ssh-add", key_path], check=False, capture_output=True, text=True, timeout=10)
+            except:
+                pass  # SSH agent operations are optional
+            
+            return key_path
+        
+        def on_success(key_path):
+            # Create account object
+            account = Account(
+                name=name,
+                email=email,
+                ssh_key_path=key_path,
+                github_username=github_username
+            )
+            
+            self.accounts[name] = account
+            self.save_config()
+            self.update_ssh_config(account)
+            self.refresh_accounts_list()
+            
+            # Show next steps
+            self.show_ssh_key_instructions(account)
+        
+        def on_error(error):
+            self.show_error(f"Failed to create account: {str(error)}")
+        
+        # Show progress and run async
+        progress = ProgressDialog(self.root, "Creating Account...")
+        progress.update_text("Generating SSH key...")
+        
+        def run_in_thread():
+            try:
+                result = generate_key()
+                self.root.after(0, lambda: [progress.close(), on_success(result)])
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to configure project: {str(e)}")
+                self.root.after(0, lambda: [progress.close(), on_error(e)])
         
-        tk.Button(config_window, text="Configure", command=do_configure).grid(row=4, column=0, columnspan=2, pady=10)
-        tk.Button(config_window, text="Cancel", command=config_window.destroy).grid(row=5, column=0, columnspan=2, pady=5)
-
-    def map_owner(self):
-        """Map a GitHub owner to an account."""
-        selected = self.repo_list.curselection()
-        if not selected:
-            messagebox.showerror("Error", "Please select a repository")
-            return
-        repo_path, account, origin_url, owner, email, protocol = self.repos[selected[0]]
-        if account != "Unknown (Map Owner)":
-            messagebox.showerror("Error", "Selected repository is not eligible for owner mapping")
-            return
+        thread = threading.Thread(target=run_in_thread)
+        thread.daemon = True
+        thread.start()
+    
+    def show_ssh_key_instructions(self, account: Account):
+        """Show instructions for adding SSH key to GitHub"""
+        instructions = tk.Toplevel(self.root)
+        instructions.title("Add SSH Key to GitHub")
+        instructions.geometry("500x400")
+        instructions.transient(self.root)
         
-        # Parse URL to extract owner
-        owner = None
-        if origin_url.startswith('https://github.com/'):
-            match = re.match(r'https://github\.com/([^/]+)/', origin_url)
-            if match:
-                owner = match.group(1)
-        # Open a dialog to select account
-        map_window = tk.Toplevel(self.root)
-        map_window.title("Map GitHub Owner to Account")
-        tk.Label(map_window, text=f"GitHub Owner: {owner or 'Unknown'}").grid(row=0, column=0, padx=5, pady=5)
-        tk.Label(map_window, text="Select Account:").grid(row=1, column=0, padx=5, pady=5)
-        account_var = tk.StringVar(map_window)
-        account_var.set("Select Account")
-        account_menu = tk.OptionMenu(map_window, account_var, "Select Account", *self.accounts.keys())
-        account_menu.grid(row=1, column=1, padx=5, pady=5)
-        def save_mapping():
-            account = account_var.get()
-            if not account or account == "Select Account":
-                messagebox.showerror("Error", "Please select a valid account")
-                return
-            if owner:
-                self.owner_to_account[owner] = account
-                messagebox.showinfo("Success", f"Mapped {owner} to {account}")
-            else:
-                messagebox.showerror("Error", "Cannot map non-GitHub repository")
-            map_window.destroy()
-            self.scan_repos()  # Refresh list
-        tk.Button(map_window, text="Save", command=save_mapping).grid(row=2, column=0, columnspan=2, pady=5)
+        tk.Label(instructions, text="SSH Key Generated Successfully!", 
+                font=('Arial', 14, 'bold'), fg='green').pack(pady=10)
+        
+        text_frame = tk.Frame(instructions)
+        text_frame.pack(pady=10, padx=20, fill='both', expand=True)
+        
+        text = f"""Your SSH key has been generated and added to SSH agent.
 
-    def show_readme(self):
-        """Show a popup with README instructions."""
-        readme_window = tk.Toplevel(self.root)
-        readme_window.title("GitHub Account Manager - README")
-        readme_window.geometry("600x400")
-        readme_window.resizable(True, True)
+Next steps:
+1. Copy the public key below
+2. Go to GitHub.com → Settings → SSH and GPG keys
+3. Click "New SSH key"
+4. Paste the key and save
 
-        # Text widget with scrollbar
-        text_area = tk.Text(readme_window, wrap=tk.WORD, height=20, width=60)
-        text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
-        scrollbar = tk.Scrollbar(readme_window, command=text_area.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        text_area.config(yscrollcommand=scrollbar.set)
-
-        # README content
-        readme_content = """
-GitHub Account Manager - User Guide
-==================================
-
-This application helps you manage GitHub accounts for local Git repositories by generating SSH keys, configuring SSH, setting up new projects, and switching repository remotes between accounts.
-
-Setup
------
-1. Ensure Git is installed on your system (includes Git Bash for Windows).
-2. Install the required Python packages:
-   - Run `pip install gitpython requests`
-3. Generate an SSH key for your personal GitHub account:
-   - In the app, go to the "Add Account" section and click "Generate SSH Key".
-   - Enter:
-     - Key Name: joshua-personal (default)
-     - Email: joshua@personal.com (default)
-     - Passphrase: Leave blank for none or enter a passphrase for extra security
-   - Click "Generate" to create the key in C:\\Users\\joshu\\.ssh\\joshua-personal (private) and joshua-personal.pub (public).
-   - The key is automatically added to the SSH agent.
-   - The email you enter (e.g., joshua@personal.com) will be used for new projects configured with this account.
-4. Add the public key to your GitHub account:
-   - Click "Open SSH Folder" to access C:\\Users\\joshu\\.ssh in File Explorer.
-   - Copy the public key:
-     ```
-     Get-Content C:\\Users\\joshu\\.ssh\\joshua-personal.pub
-     ```
-   - Go to GitHub → Settings → SSH and GPG keys → New SSH key, paste the key, and save (e.g., title it "Joshua Personal").
-5. (Optional) Create a GitHub personal access token for auto-creating repositories:
-   - Go to GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic).
-   - Generate a token with `repo` scope.
-   - Copy the token for use in the app.
-
-New Projects
-------------
-For new projects with only a .git folder (e.g., created with `git init`):
-1. Scan the project folder:
-   - Click "Browse" to select the folder (e.g., C:\\Users\\joshu\\Documents\\code). The last scanned folder is remembered.
-   - Click "Scan Repos" to list the project (e.g., C:\\Users\\joshu\\Documents\\code\\new-project -> New Project (No Remote)).
-2. Configure the project:
-   - Select the project and click "Configure New Project".
-   - Enter:
-     - GitHub Owner: josh-mds (default)
-     - Repository Name: new-project (default, based on folder name)
-     - Account: joshua-personal
-     - GitHub Token: (optional, for auto-creating the repo)
-   - Click "Configure" to set the remote URL (e.g., git@github.com-joshua-personal:josh-mds/new-project.git).
-   - The email associated with the account (e.g., joshua@personal.com for joshua-personal) will be set in the repo's .git/config.
-3. Follow the instructions:
-   - If a token was provided, the repo is created automatically.
-   - Otherwise, create the repo manually at https://github.com/josh-mds/new-project.
-   - Push the project:
-     ```
-     cd C:\\Users\\joshu\\Documents\\code\\new-project
-     git add .
-     git commit -m "Initial commit"
-     git push -u origin main
-     ```
-
-Using the Application
---------------------
-1. Launch the app:
-   - Run `python github_account_manager.py`
-   - The last scanned folder (e.g., C:\\Users\\joshu\\Documents\\code) is pre-populated in the folder field.
-2. Add SSH Configurations:
-   - In the "New Account Host" field, enter a host alias (e.g., joshua-personal).
-   - Select the SSH key (e.g., C:\\Users\\joshu\\.ssh\\joshua-personal) from the dropdown.
-   - Click "Add Account" to create an entry in C:\\Users\\joshu\\.ssh\\config.
-   - Click "Refresh" to update the SSH keys and accounts list.
-3. Access SSH Keys:
-   - Click "Open SSH Folder" to open C:\\Users\\joshu\\.ssh in File Explorer to view or copy keys (e.g., joshua-personal.pub).
-4. Scan Repositories:
-   - Click "Browse" to select a folder (e.g., C:\\Users\\joshu\\Documents\\code).
-   - Click "Scan Repos" to list all Git repositories. The folder is saved for next time.
-   - Click "Refresh" to update the repository list (e.g., after configuring a new project or pushing).
-   - Each repo shows:
-     - Path
-     - Account (e.g., Unknown, joshua-personal, New Project (No Remote), or Non-GitHub)
-     - Protocol (https, ssh, none, or other)
-     - Owner (e.g., josh-mds)
-     - Email (from .git/config, if set)
-5. Map Owners to Accounts:
-   - For repos with "Unknown (Map Owner)", select the repo and click "Map Owner to Account".
-   - Choose an account (e.g., joshua-personal) and save to associate the GitHub owner (e.g., josh-mds) with the account.
-6. Switch Repository Account:
-   - Select a repo and an account from the dropdown.
-   - Click "Switch Account" to change the remote URL to SSH (e.g., git@github.com-joshua-personal:josh-mds/repo.git).
-7. Edit/Delete SSH Configurations:
-   - Select a key in the "SSH Keys" list.
-   - Click "Edit Config" to modify the host, key, or email.
-   - Click "Delete Config" to remove the configuration.
-
-Debugging
----------
-- Check the terminal for SSH keys, ~/.ssh/config, and each repo’s .git/config.
-- Inspect the `configs` folder for saved configurations:
-  - `ssh_config.txt`: Latest ~/.ssh/config
-  - `<repo_path>_config.txt`: Latest .git/config for each repo
-- Check `config.json` for the last scanned folder path.
-- If repos show "Unknown", ensure SSH configs are added and owners are mapped.
-- For non-GitHub repos (e.g., AWS CodeCommit), the app labels them "Non-GitHub".
-
-Troubleshooting
----------------
-- No SSH keys detected? Generate a key using the "Generate SSH Key" button and click "Refresh".
-- Can't find keys? Click "Open SSH Folder" to verify C:\\Users\\joshu\\.ssh.
-- No ~/.ssh/config? Add accounts via the app to create it.
-- "Unknown (Map Owner)" persists? Map the owner to an account.
-- Errors configuring new projects? Ensure the owner and repo name are valid.
-- GUI outdated? Click "Refresh" to update repositories and keys.
-- Commits tied to wrong account? Check the user.email in .git/config and update it to match your account (e.g., joshua@personal.com for joshua-personal).
-- SSH issues? Test the connection:
-  ```
-  ssh -T git@github.com-joshua-personal
-  ```
-
-For issues, check the terminal output or contact your developer.
-"""
-        text_area.insert(tk.END, readme_content)
-        text_area.config(state=tk.DISABLED)  # Make text read-only
-
-        # Close button
-        tk.Button(readme_window, text="Close", command=readme_window.destroy).pack(pady=5)
-
-    def update_key_list(self):
-        """Update the key list display."""
-        self.key_list.delete(0, tk.END)
-        for key in self.keys:
-            account = None
-            for host, path in self.accounts.items():
-                if path == key:
-                    account = host
-                    break
-            display = f"{key} -> {account if account else 'Not used'}"
-            self.key_list.insert(tk.END, display)
-
-    def refresh(self):
-        """Refresh the repository and key lists."""
-        folder = self.folder_entry.get()
-        if not folder or not os.path.isdir(folder):
-            messagebox.showerror("Error", "Please select a valid folder before refreshing")
-            return
-        self.scan_repos()
-
-    def scan_repos(self):
-        """Scan the specified folder for Git repositories and their accounts."""
-        folder = self.folder_entry.get()
-        if not folder or not os.path.isdir(folder):
-            messagebox.showerror("Error", "Please select a valid folder")
-            return
-        self.repos = []
-        self.repo_list.delete(0, tk.END)
-        self.keys = self.detect_ssh_keys()  # Refresh keys
-        self.accounts = self.load_ssh_configs()  # Refresh accounts
-        self.update_key_list()  # Update key list
-        for root, dirs, _ in os.walk(folder):
-            if '.git' in dirs:
-                repo_path = os.path.join(root, '.git')
-                try:
-                    repo = Repo(repo_path, search_parent_directories=True)
-                    email = repo.config_reader().get_value("user", "email", "Unknown")
-                    origin_url = repo.remotes.origin.url if 'origin' in repo.remotes else None
-                    if origin_url:
-                        account = "Unknown"
-                        owner = None
-                        protocol = "other"
-                        # Handle SSH URLs
-                        match_ssh = re.match(r'git@github\.com-(\S+?):', origin_url)
-                        if match_ssh:
-                            account = match_ssh.group(1)
-                            protocol = "ssh"
-                        # Handle HTTPS URLs
-                        elif origin_url.startswith('https://github.com/'):
-                            match_https = re.match(r'https://github\.com/([^/]+)/', origin_url)
-                            if match_https:
-                                owner = match_https.group(1)
-                                account = self.owner_to_account.get(owner, "Unknown (Map Owner)")
-                                protocol = "https"
-                        # Handle non-GitHub URLs
-                        else:
-                            account = "Non-GitHub"
-                            protocol = "other"
-                        self.repos.append((repo.working_dir, account, origin_url, owner, email, protocol))
-                        display = f"{repo.working_dir} -> {account} (Protocol: {protocol}, Owner: {owner or 'N/A'}, Email: {email})"
-                    else:
-                        # New project with no remote
-                        account = "New Project (No Remote)"
-                        protocol = "none"
-                        self.repos.append((repo.working_dir, account, None, None, email, protocol))
-                        display = f"{repo.working_dir} -> {account} (Protocol: {protocol}, Owner: N/A, Email: {email})"
-                    self.repo_list.insert(tk.END, display)
-                    # Print and save repo config
-                    config_path = os.path.join(repo.working_dir, '.git', 'config')
-                    print(f"\n=== Git Config for {repo.working_dir} ===")
-                    with open(config_path, 'r') as f:
-                        content = f.read()
-                        print(content)
-                        # Save to configs folder
-                        repo_name = repo.working_dir.replace(os.sep, '_').replace(':', '_').strip('_')
-                        config_output = os.path.join(self.configs_dir, f"{repo_name}_config.txt")
-                        with open(config_output, 'w') as f_out:
-                            f_out.write(content)
-                except Exception as e:
-                    print(f"Error scanning {repo_path}: {e}")
-        if not self.repos:
-            messagebox.showinfo("Info", "No Git repositories found in the folder")
-        # Save the scanned folder path
-        self.save_last_scanned_path(folder)
-
-    def add_account(self):
-        """Add a new GitHub account to SSH config."""
-        host = self.host_entry.get()
-        identity_file = self.key_var.get()
-        if not host or not identity_file or identity_file == "Select Key":
-            messagebox.showerror("Error", "Please enter host and select a key")
-            return
-        if not os.path.exists(identity_file):
-            messagebox.showerror("Error", "Identity file does not exist")
-            return
-        if host not in self.account_emails:
-            messagebox.showinfo("Info", f"No email associated with {host}. Please set one.")
-            # Open a dialog to set email
-            email_window = tk.Toplevel(self.root)
-            email_window.title("Set Email for Account")
-            tk.Label(email_window, text=f"Email for {host}:").grid(row=0, column=0, padx=5, pady=5)
-            email_entry = tk.Entry(email_window, width=30)
-            email_entry.grid(row=0, column=1, padx=5, pady=5)
-            email_entry.insert(0, f"{host}@personal.com")
-            def save_email():
-                email = email_entry.get().strip()
-                if not email:
-                    messagebox.showerror("Error", "Email is required")
-                    return
-                self.account_emails[host] = email
-                self.save_ssh_config(host, identity_file)
-                messagebox.showinfo("Success", f"Added account github.com-{host} with email {email}")
-                self.host_entry.delete(0, tk.END)
-                self.key_var.set("Select Key")
-                email_window.destroy()
-            tk.Button(email_window, text="Save", command=save_email).grid(row=1, column=0, columnspan=2, pady=5)
-        else:
-            self.save_ssh_config(host, identity_file)
-            messagebox.showinfo("Success", f"Added account github.com-{host} with email {self.account_emails[host]}")
-            self.host_entry.delete(0, tk.END)
-            self.key_var.set("Select Key")
-
-    def switch_account(self):
-        """Switch the selected repository's remote to a different account."""
-        selected = self.repo_list.curselection()
-        if not selected:
-            messagebox.showerror("Error", "Please select a repository")
-            return
-        new_account = self.account_var.get()
-        if not new_account or new_account == "Select Account":
-            messagebox.showerror("Error", "Please select a valid account")
-            return
-        repo_path, account, old_url, owner, email, protocol = self.repos[selected[0]]
-        if account == "New Project (No Remote)":
-            messagebox.showerror("Error", "Use 'Configure New Project' for repositories without a remote")
-            return
+Public Key for {account.name}:"""
+        
+        tk.Label(text_frame, text=text, justify='left').pack(anchor='w')
+        
+        # Public key text area
+        key_text = tk.Text(text_frame, height=8, width=60)
+        key_text.pack(pady=10, fill='both', expand=True)
+        
         try:
-            repo = Repo(repo_path)
-            # Parse old URL to get owner/repo
-            match = re.match(r'(?:git@github\.com-\S+?:|https://github\.com/)([^/]+/[^/]+?)(?:\.git)?$', old_url)
-            if not match:
-                messagebox.showerror("Error", "Invalid remote URL format")
-                return
-            repo_part = match.group(1)
-            new_url = f"git@github.com-{new_account}:{repo_part}.git"
-            repo.remotes.origin.set_url(new_url)
-            # Update user.email and user.name
-            account_email = self.account_emails.get(new_account, f"{new_account}@personal.com")
-            with repo.config_writer() as config:
-                config.set_value("user", "email", account_email)
-                config.set_value("user", "name", new_account)
-            # Update owner mapping if owner exists
-            if owner:
-                self.owner_to_account[owner] = new_account
-            # Save updated repo config
-            config_path = os.path.join(repo.working_dir, '.git', 'config')
-            print(f"\n=== Updated Git Config for {repo.working_dir} ===")
-            with open(config_path, 'r') as f:
-                content = f.read()
-                print(content)
-                # Save to configs folder
-                repo_name = repo.working_dir.replace(os.sep, '_').replace(':', '_').strip('_')
-                config_output = os.path.join(self.configs_dir, f"{repo_name}_config.txt")
-                with open(config_output, 'w') as f_out:
-                    f_out.write(content)
-            self.scan_repos()  # Refresh list
-            messagebox.showinfo("Success", f"Switched {repo_path} to {new_account}")
+            with open(f"{account.ssh_key_path}.pub", 'r') as f:
+                public_key = f.read()
+                key_text.insert('1.0', public_key)
+                key_text.config(state='disabled')
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to switch account: {e}")
-
-    def select_folder(self):
-        """Open a folder selection dialog."""
-        folder = filedialog.askdirectory()
-        if folder:
-            self.folder_entry.delete(0, tk.END)
-            self.folder_entry.insert(0, folder)
-            self.save_last_scanned_path(folder)
-
+            key_text.insert('1.0', f"Error reading public key: {e}")
+        
+        # Buttons
+        button_frame = tk.Frame(instructions)
+        button_frame.pack(pady=10)
+        
+        def copy_key():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(public_key)
+            self.show_success("Public key copied to clipboard!")
+        
+        tk.Button(button_frame, text="Copy Key", command=copy_key).pack(side='left', padx=5)
+        tk.Button(button_frame, text="Open GitHub", 
+                 command=lambda: webbrowser.open("https://github.com/settings/keys")).pack(side='left', padx=5)
+        tk.Button(button_frame, text="Done", command=instructions.destroy).pack(side='left', padx=5)
+    
+    def update_ssh_config(self, account: Account):
+        """Update SSH config for account"""
+        # Read existing config
+        content = ""
+        if os.path.exists(self.ssh_config_path):
+            with open(self.ssh_config_path, 'r') as f:
+                content = f.read()
+        
+        # Remove existing entry for this account
+        lines = content.split('\n')
+        new_lines = []
+        skip = False
+        
+        for line in lines:
+            if line.strip() == f"Host github.com-{account.name}":
+                skip = True
+                continue
+            elif line.strip().startswith('Host ') and skip:
+                skip = False
+            
+            if not skip:
+                new_lines.append(line)
+        
+        # Add new entry
+        config_entry = f"""
+# {account.name} account
+Host github.com-{account.name}
+    HostName github.com
+    User git
+    IdentityFile {account.ssh_key_path}
+"""
+        new_lines.append(config_entry)
+        
+        # Write config
+        os.makedirs(os.path.dirname(self.ssh_config_path), exist_ok=True)
+        with open(self.ssh_config_path, 'w') as f:
+            f.write('\n'.join(new_lines))
+    
     def setup_gui(self):
-        """Setup the tkinter GUI."""
-        # Folder selection
-        tk.Label(self.root, text="Folder Path:").grid(row=0, column=0, padx=5, pady=5)
-        self.folder_entry = tk.Entry(self.root, width=50)
-        self.folder_entry.grid(row=0, column=1, padx=5, pady=5)
-        if self.last_scanned_path:
-            self.folder_entry.insert(0, self.last_scanned_path)
-        tk.Button(self.root, text="Browse", command=self.select_folder).grid(row=0, column=2, padx=5, pady=5)
-        tk.Button(self.root, text="Scan Repos", command=self.scan_repos).grid(row=0, column=3, padx=5, pady=5)
-        tk.Button(self.root, text="Refresh", command=self.refresh).grid(row=0, column=4, padx=5, pady=5)
-        tk.Button(self.root, text="Information", command=self.show_readme).grid(row=0, column=5, padx=5, pady=5)
-
-        # Repository list
-        tk.Label(self.root, text="Repositories:").grid(row=1, column=0, padx=5, pady=5)
-        self.repo_list = tk.Listbox(self.root, width=120, height=10)
-        self.repo_list.grid(row=2, column=0, columnspan=6, padx=5, pady=5)
-        tk.Button(self.root, text="Map Owner to Account", command=self.map_owner).grid(row=3, column=0, padx=5, pady=5)
-        tk.Button(self.root, text="Configure New Project", command=self.configure_new_project).grid(row=3, column=1, padx=5, pady=5)
-
-        # SSH Keys list
-        tk.Label(self.root, text="SSH Keys:").grid(row=4, column=0, padx=5, pady=5)
-        self.key_list = tk.Listbox(self.root, width=80, height=5)
-        self.key_list.grid(row=5, column=0, columnspan=6, padx=5, pady=5)
-        tk.Button(self.root, text="Edit Config", command=self.edit_ssh_config).grid(row=6, column=0, padx=5, pady=5)
-        tk.Button(self.root, text="Delete Config", command=self.delete_ssh_config).grid(row=6, column=1, padx=5, pady=5)
-        self.update_key_list()
-
-        # Add account
-        tk.Label(self.root, text="New Account Host (e.g., joshua-personal):").grid(row=7, column=0, padx=5, pady=5)
-        self.host_entry = tk.Entry(self.root, width=20)
-        self.host_entry.grid(row=7, column=1, padx=5, pady=5)
-        tk.Label(self.root, text="Select SSH Key:").grid(row=8, column=0, padx=5, pady=5)
-        self.key_var = tk.StringVar(self.root)
-        self.key_var.set("Select Key")
-        key_menu = tk.OptionMenu(self.root, self.key_var, "Select Key", *self.keys)
-        key_menu.grid(row=8, column=1, padx=5, pady=5)
-        tk.Button(self.root, text="Add Account", command=self.add_account).grid(row=8, column=2, padx=5, pady=5)
-        tk.Button(self.root, text="Generate SSH Key", command=self.generate_ssh_key).grid(row=8, column=3, padx=5, pady=5)
-        tk.Button(self.root, text="Open SSH Folder", command=self.open_ssh_folder).grid(row=8, column=4, padx=5, pady=5)
-
-        # Switch account
-        tk.Label(self.root, text="Switch Selected Repo to Account:").grid(row=9, column=0, padx=5, pady=5)
-        self.account_var = tk.StringVar(self.root)
-        self.account_var.set("Select Account")
-        self.account_menu = tk.OptionMenu(self.root, self.account_var, "Select Account")
-        self.account_menu.grid(row=9, column=1, padx=5, pady=5)
-        for account in self.accounts.keys():
-            self.account_menu['menu'].add_command(label=account, command=tk._setit(self.account_var, account))
-        tk.Button(self.root, text="Switch Account", command=self.switch_account).grid(row=9, column=2, padx=5, pady=5)
+        """Setup the main GUI with improved layout"""
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Accounts tab
+        self.accounts_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.accounts_frame, text="Accounts")
+        self.setup_accounts_tab()
+        
+        # Repositories tab
+        self.repos_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.repos_frame, text="Repositories")
+        self.setup_repositories_tab()
+        
+        # Settings tab
+        self.settings_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.settings_frame, text="Settings")
+        self.setup_settings_tab()
+    
+    def setup_accounts_tab(self):
+        """Setup accounts management tab"""
+        # Header
+        header_frame = ttk.Frame(self.accounts_frame)
+        header_frame.pack(fill='x', pady=10)
+        
+        ttk.Label(header_frame, text="GitHub Accounts", 
+                 font=('Arial', 16, 'bold')).pack(side='left')
+        ttk.Button(header_frame, text="+ Add Account", 
+                  command=self.create_account_wizard).pack(side='right')
+        
+        # Accounts list
+        list_frame = ttk.Frame(self.accounts_frame)
+        list_frame.pack(fill='both', expand=True, pady=10)
+        
+        # Treeview for accounts
+        columns = ('Name', 'Email', 'GitHub Username', 'SSH Key')
+        self.accounts_tree = ttk.Treeview(list_frame, columns=columns, show='headings')
+        
+        for col in columns:
+            self.accounts_tree.heading(col, text=col)
+            self.accounts_tree.column(col, width=150)
+        
+        self.accounts_tree.pack(fill='both', expand=True)
+        
+        # Context menu for accounts
+        self.accounts_menu = tk.Menu(self.root, tearoff=0)
+        self.accounts_menu.add_command(label="Edit", command=self.edit_account)
+        self.accounts_menu.add_command(label="Delete", command=self.delete_account)
+        self.accounts_menu.add_command(label="Test Connection", command=self.test_ssh_connection)
+        
+        self.accounts_tree.bind("<Button-3>", self.show_accounts_menu)
+        
+        # Refresh accounts list
+        self.refresh_accounts_list()
+    
+    def setup_repositories_tab(self):
+        """Setup repositories management tab"""
+        # Repository scanning
+        scan_frame = ttk.LabelFrame(self.repos_frame, text="Repository Scanner")
+        scan_frame.pack(fill='x', pady=10, padx=10)
+        
+        path_frame = ttk.Frame(scan_frame)
+        path_frame.pack(fill='x', pady=5)
+        
+        ttk.Label(path_frame, text="Scan Path:").pack(side='left')
+        self.path_var = tk.StringVar(value=self.last_scanned_path)
+        self.path_entry = ttk.Entry(path_frame, textvariable=self.path_var, width=50)
+        self.path_entry.pack(side='left', padx=5, fill='x', expand=True)
+        
+        ttk.Button(path_frame, text="Browse", command=self.browse_folder).pack(side='left', padx=5)
+        ttk.Button(path_frame, text="Scan", command=self.scan_repositories).pack(side='left', padx=5)
+        
+        # Repositories list
+        repos_list_frame = ttk.LabelFrame(self.repos_frame, text="Repositories")
+        repos_list_frame.pack(fill='both', expand=True, pady=10, padx=10)
+        
+        # Treeview for repositories
+        repo_columns = ('Path', 'Account', 'Remote URL', 'Status')
+        self.repos_tree = ttk.Treeview(repos_list_frame, columns=repo_columns, show='headings')
+        
+        for col in repo_columns:
+            self.repos_tree.heading(col, text=col)
+            self.repos_tree.column(col, width=200)
+        
+        self.repos_tree.pack(fill='both', expand=True)
+        
+        # Repository actions
+        actions_frame = ttk.Frame(repos_list_frame)
+        actions_frame.pack(fill='x', pady=5)
+        
+        ttk.Button(actions_frame, text="Switch Account", 
+                  command=self.switch_repo_account).pack(side='left', padx=5)
+        ttk.Button(actions_frame, text="Configure New Repo", 
+                  command=self.configure_new_repo).pack(side='left', padx=5)
+    
+    def setup_settings_tab(self):
+        """Setup settings tab"""
+        # System info
+        info_frame = ttk.LabelFrame(self.settings_frame, text="System Information")
+        info_frame.pack(fill='x', pady=10, padx=10)
+        
+        # Check system status
+        git_ok, git_msg = DependencyChecker.check_git()
+        ssh_ok, ssh_msg = DependencyChecker.check_ssh()
+        py_ok, py_msg = DependencyChecker.check_python_deps()
+        
+        ttk.Label(info_frame, text=f"Git: {'✅' if git_ok else '❌'} {git_msg}").pack(anchor='w', pady=2)
+        ttk.Label(info_frame, text=f"SSH: {'✅' if ssh_ok else '❌'} {ssh_msg}").pack(anchor='w', pady=2)
+        ttk.Label(info_frame, text=f"Python Deps: {'✅' if py_ok else '❌'} {py_msg}").pack(anchor='w', pady=2)
+        
+        # Actions
+        actions_frame = ttk.LabelFrame(self.settings_frame, text="Actions")
+        actions_frame.pack(fill='x', pady=10, padx=10)
+        
+        ttk.Button(actions_frame, text="Open SSH Folder", 
+                  command=self.open_ssh_folder).pack(side='left', padx=5, pady=5)
+        ttk.Button(actions_frame, text="Run Setup Wizard", 
+                  command=self.show_setup_wizard).pack(side='left', padx=5, pady=5)
+        ttk.Button(actions_frame, text="Export Configuration", 
+                  command=self.export_config).pack(side='left', padx=5, pady=5)
+    
+    def refresh_accounts_list(self):
+        """Refresh the accounts list"""
+        # Clear existing items
+        for item in self.accounts_tree.get_children():
+            self.accounts_tree.delete(item)
+        
+        # Add accounts
+        for account in self.accounts.values():
+            self.accounts_tree.insert('', 'end', values=(
+                account.name,
+                account.email,
+                account.github_username or 'Not set',
+                os.path.basename(account.ssh_key_path)
+            ))
+    
+    def show_accounts_menu(self, event):
+        """Show context menu for accounts"""
+        item = self.accounts_tree.selection()[0] if self.accounts_tree.selection() else None
+        if item:
+            self.accounts_menu.post(event.x_root, event.y_root)
+    
+    def edit_account(self):
+        """Edit selected account"""
+        selection = self.accounts_tree.selection()
+        if not selection:
+            self.show_error("Please select an account to edit")
+            return
+        
+        # Get account name from selection
+        item = selection[0]
+        account_name = self.accounts_tree.item(item)['values'][0]
+        account = self.accounts[account_name]
+        
+        # Show edit dialog (implement as needed)
+        self.show_info(f"Edit functionality for {account_name} coming soon!")
+    
+    def delete_account(self):
+        """Delete selected account"""
+        selection = self.accounts_tree.selection()
+        if not selection:
+            self.show_error("Please select an account to delete")
+            return
+        
+        item = selection[0]
+        account_name = self.accounts_tree.item(item)['values'][0]
+        
+        if messagebox.askyesno("Confirm Delete", 
+                              f"Are you sure you want to delete account '{account_name}'?\n\n"
+                              "This will remove the SSH configuration but keep the SSH key files."):
+            del self.accounts[account_name]
+            self.save_config()
+            self.refresh_accounts_list()
+            self.show_success(f"Account '{account_name}' deleted successfully")
+    
+    def test_ssh_connection(self):
+        """Test SSH connection for selected account"""
+        selection = self.accounts_tree.selection()
+        if not selection:
+            self.show_error("Please select an account to test")
+            return
+        
+        item = selection[0]
+        account_name = self.accounts_tree.item(item)['values'][0]
+        
+        def test_connection():
+            try:
+                cmd = ["ssh", "-T", f"git@github.com-{account_name}"]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                # SSH to GitHub returns exit code 1 on successful auth
+                if "successfully authenticated" in result.stderr:
+                    return True, "Connection successful"
+                else:
+                    return False, result.stderr or "Connection failed"
+            except subprocess.TimeoutExpired:
+                return False, "Connection timeout"
+            except Exception as e:
+                return False, str(e)
+        
+        def on_test_complete(result):
+            success, message = result
+            if success:
+                self.show_success(f"SSH connection test passed for '{account_name}'")
+            else:
+                self.show_error(f"SSH connection test failed for '{account_name}':\n{message}")
+        
+        self.run_async_operation(test_connection, on_test_complete)
+    
+    def browse_folder(self):
+        """Browse for folder to scan"""
+        folder = filedialog.askdirectory(initialdir=self.last_scanned_path)
+        if folder:
+            self.path_var.set(folder)
+            self.last_scanned_path = folder
+            self.save_config()
+    
+    def scan_repositories(self):
+        """Scan for repositories in the selected path"""
+        path = self.path_var.get()
+        if not path or not os.path.isdir(path):
+            self.show_error("Please select a valid directory to scan")
+            return
+        
+        def scan():
+            repos = []
+            for root, dirs, files in os.walk(path):
+                if '.git' in dirs:
+                    try:
+                        repo = Repo(root)
+                        status = self.get_repo_status(repo)
+                        remote_url = repo.remotes.origin.url if 'origin' in repo.remotes else 'No remote'
+                        account = self.detect_repo_account(remote_url)
+                        
+                        repos.append((root, account, remote_url, status))
+                    except Exception as e:
+                        repos.append((root, 'Error', f'Error: {e}', 'Error'))
+            return repos
+        
+        def on_scan_complete(repos):
+            self.repos = repos
+            self.refresh_repos_list()
+            self.show_success(f"Found {len(repos)} repositories")
+        
+        self.run_async_operation(scan, on_scan_complete)
+    
+    def get_repo_status(self, repo) -> str:
+        """Get repository status"""
+        try:
+            if repo.is_dirty():
+                return "Modified"
+            elif repo.untracked_files:
+                return "Untracked files"
+            else:
+                return "Clean"
+        except:
+            return "Unknown"
+    
+    def detect_repo_account(self, remote_url: str) -> str:
+        """Detect which account a repository belongs to"""
+        if not remote_url or remote_url == 'No remote':
+            return 'No remote'
+        
+        # Check for SSH URLs with account host
+        match = re.match(r'git@github\.com-(\w+):', remote_url)
+        if match:
+            account_name = match.group(1)
+            return account_name if account_name in self.accounts else 'Unknown account'
+        
+        # Check for HTTPS URLs
+        if 'github.com' in remote_url:
+            return 'HTTPS (needs conversion)'
+        
+        return 'Non-GitHub'
+    
+    def refresh_repos_list(self):
+        """Refresh the repositories list"""
+        # Clear existing items
+        for item in self.repos_tree.get_children():
+            self.repos_tree.delete(item)
+        
+        # Add repositories
+        for repo_data in self.repos:
+            path, account, remote_url, status = repo_data
+            display_path = path.replace(self.path_var.get(), '').lstrip(os.sep) or os.path.basename(path)
+            self.repos_tree.insert('', 'end', values=(
+                display_path,
+                account,
+                remote_url[:50] + '...' if len(remote_url) > 50 else remote_url,
+                status
+            ))
+    
+    def switch_repo_account(self):
+        """Switch repository to different account"""
+        self.show_info("Switch account functionality coming soon!")
+    
+    def configure_new_repo(self):
+        """Configure a new repository"""
+        self.show_info("Configure new repository functionality coming soon!")
+    
+    def open_ssh_folder(self):
+        """Open SSH folder in file manager"""
+        try:
+            if platform.system() == "Windows":
+                os.startfile(self.ssh_dir)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", self.ssh_dir])
+            else:  # Linux
+                subprocess.run(["xdg-open", self.ssh_dir])
+        except Exception as e:
+            self.show_error(f"Could not open SSH folder: {e}")
+    
+    def export_config(self):
+        """Export configuration to file"""
+        try:
+            export_path = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
+            if export_path:
+                with open(export_path, 'w') as f:
+                    json.dump({
+                        "accounts": {name: {
+                            "name": acc.name,
+                            "email": acc.email,
+                            "ssh_key_path": acc.ssh_key_path,
+                            "github_username": acc.github_username
+                        } for name, acc in self.accounts.items()},
+                        "last_scanned_path": self.last_scanned_path
+                    }, f, indent=2)
+                self.show_success(f"Configuration exported to {export_path}")
+        except Exception as e:
+            self.show_error(f"Failed to export configuration: {e}")
 
 if __name__ == "__main__":
     root = tk.Tk()
-    root.resizable(True, True)
-    app = GitHubAccountManager(root)
+    app = ImprovedGitHubAccountManager(root)
     root.mainloop()

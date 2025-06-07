@@ -1,0 +1,1 @@
+GitPython>=3.1.0\nrequests>=2.25.0\npyinstaller>=5.0.0\nsetuptools>=45.0.0\nwheel>=0.36.0
