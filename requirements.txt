@@ -1,3 +1,1 @@
-# GitHub Account Manager Dependencies
-gitpython>=3.1.0
-requests>=2.25.0
+GitPython>=3.1.0\nrequests>=2.25.0
