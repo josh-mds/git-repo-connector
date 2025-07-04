@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
 from enum import Enum
 import webbrowser
+from datetime import datetime
 
 class SetupStep(Enum):
     """Setup wizard steps"""
@@ -651,6 +652,998 @@ You can always run this wizard again from Settings."""
         if current_index > 0:
             self.current_step = steps[current_index - 1]
             self.show_step()
+
+
+class RemoteManager:
+    """Enhanced remote management functionality for the GitHub Account Manager"""
+    
+    def __init__(self, parent_app):
+        self.app = parent_app
+        self.root = parent_app.root
+    
+    def add_remote_management_ui(self):
+        """Add remote management button to the existing repositories tab"""
+        # This should be called from the parent app's setup_repositories_tab method
+        # Add this button to the existing actions_frame
+        
+        # Find the actions frame (this would be added to the existing setup_repositories_tab method)
+        actions_frame = None
+        for child in self.app.repos_frame.winfo_children():
+            if isinstance(child, ttk.LabelFrame) and "Repositories" in str(child.cget("text")):
+                for grandchild in child.winfo_children():
+                    if isinstance(grandchild, ttk.Frame):
+                        actions_frame = grandchild
+                        break
+        
+        if actions_frame:
+            ttk.Button(actions_frame, text="🔗 Manage Remotes", 
+                      command=self.show_manage_remotes_dialog).pack(side='left', padx=5)
+    
+    def show_manage_remotes_dialog(self):
+        """Show dialog to manage all remotes for selected repository"""
+        selection = self.app.repos_tree.selection()
+        if not selection:
+            self.app.show_error("Please select a repository to manage remotes")
+            return
+        
+        # Get repository data
+        item = selection[0]
+        repo_index = self.app.repos_tree.index(item)
+        repo_path, current_account, remote_url, status = self.app.repos[repo_index]
+        
+        try:
+            repo = Repo(repo_path)
+        except Exception as e:
+            self.app.show_error(f"Failed to access repository: {e}")
+            return
+        
+        # Create dialog
+        remotes_window = tk.Toplevel(self.root)
+        remotes_window.title(f"Manage Remotes - {os.path.basename(repo_path)}")
+        remotes_window.geometry("800x600")
+        remotes_window.transient(self.root)
+        remotes_window.grab_set()
+        
+        # Header
+        header_frame = tk.Frame(remotes_window)
+        header_frame.pack(fill='x', pady=15, padx=20)
+        
+        tk.Label(header_frame, text="Manage Repository Remotes", 
+                font=('Arial', 16, 'bold')).pack()
+        tk.Label(header_frame, text=f"Repository: {os.path.basename(repo_path)}", 
+                font=('Arial', 10)).pack(pady=5)
+        
+        # Remotes list frame
+        list_frame = tk.LabelFrame(remotes_window, text="Current Remotes")
+        list_frame.pack(fill='both', expand=True, pady=10, padx=20)
+        
+        # Treeview for remotes
+        columns = ('Name', 'URL', 'Account', 'Status')
+        remotes_tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=8)
+        
+        # Configure columns
+        remotes_tree.heading('Name', text='Remote Name')
+        remotes_tree.column('Name', width=120)
+        
+        remotes_tree.heading('URL', text='Remote URL')
+        remotes_tree.column('URL', width=300)
+        
+        remotes_tree.heading('Account', text='Associated Account')
+        remotes_tree.column('Account', width=150)
+        
+        remotes_tree.heading('Status', text='Status')
+        remotes_tree.column('Status', width=150)
+        
+        # Scrollbars
+        v_scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=remotes_tree.yview)
+        h_scrollbar = ttk.Scrollbar(list_frame, orient="horizontal", command=remotes_tree.xview)
+        remotes_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+        
+        remotes_tree.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        v_scrollbar.pack(side="right", fill="y")
+        h_scrollbar.pack(side="bottom", fill="x")
+        
+        # Populate remotes
+        self.refresh_remotes_list(repo, remotes_tree)
+        
+        # Actions frame
+        actions_frame = tk.Frame(remotes_window)
+        actions_frame.pack(fill='x', pady=15, padx=20)
+        
+        # Left side buttons
+        left_buttons = tk.Frame(actions_frame)
+        left_buttons.pack(side='left')
+        
+        tk.Button(left_buttons, text="➕ Add Remote", 
+                 command=lambda: self.add_remote_dialog(repo, remotes_tree)).pack(side='left', padx=5)
+        tk.Button(left_buttons, text="✏️ Edit Remote", 
+                 command=lambda: self.edit_remote_dialog(repo, remotes_tree)).pack(side='left', padx=5)
+        tk.Button(left_buttons, text="🗑️ Remove Remote", 
+                 command=lambda: self.remove_remote(repo, remotes_tree)).pack(side='left', padx=5)
+        
+        # Right side buttons
+        right_buttons = tk.Frame(actions_frame)
+        right_buttons.pack(side='right')
+        
+        tk.Button(right_buttons, text="🔄 Refresh", 
+                 command=lambda: self.refresh_remotes_list(repo, remotes_tree)).pack(side='left', padx=5)
+        tk.Button(right_buttons, text="🧪 Test Connection", 
+                 command=lambda: self.test_remote_connection(repo, remotes_tree)).pack(side='left', padx=5)
+        tk.Button(right_buttons, text="🔍 Debug Remote", 
+         command=lambda: self.debug_deploy_remote(repo, remotes_tree)).pack(side='left', padx=5)
+        
+        # Bottom buttons
+        bottom_frame = tk.Frame(remotes_window)
+        bottom_frame.pack(fill='x', pady=15, padx=20)
+        
+        def close_and_refresh():
+            remotes_window.destroy()
+            self.app.scan_repositories()  # Refresh the main repository list
+        
+        tk.Button(bottom_frame, text="Close", command=close_and_refresh, 
+                 font=('Arial', 10, 'bold'), width=10).pack(side='right')
+        
+        # Context menu
+        remote_menu = tk.Menu(self.root, tearoff=0)
+        remote_menu.add_command(label="Edit", command=lambda: self.edit_remote_dialog(repo, remotes_tree))
+        remote_menu.add_command(label="Remove", command=lambda: self.remove_remote(repo, remotes_tree))
+        remote_menu.add_command(label="Test Connection", command=lambda: self.test_remote_connection(repo, remotes_tree))
+        remote_menu.add_command(label="Set as Default", command=lambda: self.set_default_remote(repo, remotes_tree))
+        
+        def show_remote_menu(event):
+            if remotes_tree.selection():
+                remote_menu.post(event.x_root, event.y_root)
+        
+        remotes_tree.bind("<Button-3>", show_remote_menu)
+    
+    def refresh_remotes_list(self, repo: Repo, tree: ttk.Treeview):
+        """Refresh the remotes list in the treeview"""
+        # Clear existing items
+        for item in tree.get_children():
+            tree.delete(item)
+        
+        # Get all remotes
+        remotes_data = self.get_all_remotes(repo)
+        
+        # Add remotes to tree
+        for remote_info in remotes_data:
+            tree.insert('', 'end', values=(
+                remote_info['name'],
+                remote_info['url'],
+                remote_info['account'],
+                remote_info['status']
+            ))
+    
+    def get_all_remotes(self, repo: Repo) -> List[Dict]:
+        """Get information about all remotes for a repository"""
+        remotes_data = []
+        
+        try:
+            for remote in repo.remotes:
+                url = remote.url
+                account = self.detect_account_from_url(url)
+                status = self.get_remote_status(repo, remote.name)
+                
+                remotes_data.append({
+                    'name': remote.name,
+                    'url': url,
+                    'account': account,
+                    'status': status
+                })
+        except Exception as e:
+            remotes_data.append({
+                'name': 'Error',
+                'url': f'Error reading remotes: {e}',
+                'account': 'Unknown',
+                'status': 'Error'
+            })
+        
+        return remotes_data
+    
+    def detect_account_from_url(self, url: str) -> str:
+        """Detect which account a remote URL belongs to"""
+        if not url:
+            return 'Unknown'
+        
+        # Check for SSH URLs with account host
+        match = re.match(r'git@github\.com-(\w+):', url)
+        if match:
+            account_name = match.group(1)
+            if account_name in self.app.accounts:
+                return f'✅ {account_name}'
+            else:
+                return f'❓ {account_name} (Not Found)'
+        
+        # Check for standard GitHub URLs
+        if 'github.com' in url:
+            if url.startswith('git@github.com:'):
+                return '🔄 GitHub SSH (No Account)'
+            elif url.startswith('https://github.com'):
+                return '🔗 GitHub HTTPS'
+        
+        return '🚫 Non-GitHub'
+    
+    def get_remote_status(self, repo: Repo, remote_name: str) -> str:
+        """Get status information for a remote"""
+        try:
+            remote = repo.remotes[remote_name]
+            
+            # Check if we can fetch from remote
+            try:
+                # Test connection (this might take a moment)
+                refs = remote.refs
+                if refs:
+                    return f"✅ Connected ({len(refs)} refs)"
+                else:
+                    return "⚠️ Connected (No refs)"
+            except Exception:
+                return "❌ Connection Failed"
+                
+        except Exception as e:
+            return f"❌ Error: {str(e)[:20]}"
+    
+    def add_remote_dialog(self, repo: Repo, tree: ttk.Treeview):
+        """Show dialog to add a new remote"""
+        if not self.app.accounts:
+            self.app.show_error("No accounts configured. Please add an account first.")
+            return
+        
+        add_window = tk.Toplevel(self.root)
+        add_window.title("Add New Remote")
+        add_window.geometry("600x500")
+        add_window.transient(self.root)
+        add_window.grab_set()
+        
+        # Header
+        tk.Label(add_window, text="Add New Remote", 
+                font=('Arial', 14, 'bold')).pack(pady=15)
+        
+        # Form frame
+        form_frame = tk.LabelFrame(add_window, text="Remote Configuration")
+        form_frame.pack(fill='x', pady=15, padx=20)
+        
+        # Remote name
+        tk.Label(form_frame, text="Remote Name:", font=('Arial', 10, 'bold')).grid(row=0, column=0, sticky='w', pady=10, padx=15)
+        name_var = tk.StringVar()
+        name_entry = tk.Entry(form_frame, textvariable=name_var, width=30)
+        name_entry.grid(row=0, column=1, pady=10, padx=15, sticky='w')
+        
+        # Common remote names
+        common_frame = tk.Frame(form_frame)
+        common_frame.grid(row=1, column=1, sticky='w', padx=15)
+        
+        def set_name(name):
+            name_var.set(name)
+        
+        tk.Label(common_frame, text="Common names:", font=('Arial', 8), fg='gray').pack(anchor='w')
+        buttons_frame = tk.Frame(common_frame)
+        buttons_frame.pack(anchor='w')
+        
+        for name in ['upstream', 'fork', 'backup', 'deploy']:
+            tk.Button(buttons_frame, text=name, command=lambda n=name: set_name(n), 
+                     font=('Arial', 8), width=8).pack(side='left', padx=2)
+        
+        # Account selection
+        tk.Label(form_frame, text="Account:", font=('Arial', 10, 'bold')).grid(row=2, column=0, sticky='w', pady=10, padx=15)
+        account_var = tk.StringVar()
+        account_combo = ttk.Combobox(form_frame, textvariable=account_var, 
+                                   values=list(self.app.accounts.keys()), 
+                                   state='readonly', width=28)
+        account_combo.grid(row=2, column=1, pady=10, padx=15, sticky='w')
+        
+        if self.app.accounts:
+            account_combo.set(list(self.app.accounts.keys())[0])
+        
+        # Repository details
+        tk.Label(form_frame, text="GitHub Owner:", font=('Arial', 10, 'bold')).grid(row=3, column=0, sticky='w', pady=10, padx=15)
+        owner_var = tk.StringVar()
+        owner_entry = tk.Entry(form_frame, textvariable=owner_var, width=30)
+        owner_entry.grid(row=3, column=1, pady=10, padx=15, sticky='w')
+        
+        tk.Label(form_frame, text="Repository Name:", font=('Arial', 10, 'bold')).grid(row=4, column=0, sticky='w', pady=10, padx=15)
+        repo_name_var = tk.StringVar(value=os.path.basename(repo.working_dir))
+        repo_entry = tk.Entry(form_frame, textvariable=repo_name_var, width=30)
+        repo_entry.grid(row=4, column=1, pady=10, padx=15, sticky='w')
+        
+        # Auto-fill owner from account
+        def update_owner(*args):
+            selected_account = account_var.get()
+            if selected_account and selected_account in self.app.accounts:
+                account = self.app.accounts[selected_account]
+                if account.github_username:
+                    owner_var.set(account.github_username)
+        
+        account_var.trace('w', update_owner)
+        update_owner()
+        
+        # URL preview
+        preview_frame = tk.LabelFrame(add_window, text="Remote URL Preview")
+        preview_frame.pack(fill='x', pady=15, padx=20)
+        
+        preview_label = tk.Label(preview_frame, text="", font=('Consolas', 9), fg='blue')
+        preview_label.pack(pady=10, padx=15)
+        
+        def update_preview(*args):
+            account = account_var.get()
+            owner = owner_var.get().strip()
+            repo_name = repo_name_var.get().strip()
+            
+            if account and owner and repo_name:
+                url = f"git@github.com-{account}:{owner}/{repo_name}.git"
+                preview_label.config(text=url)
+            else:
+                preview_label.config(text="Fill in all fields to preview URL")
+        
+        # Bind update to all relevant fields
+        for var in [account_var, owner_var, repo_name_var]:
+            var.trace('w', update_preview)
+        
+        update_preview()
+        
+        # Buttons
+        button_frame = tk.Frame(add_window)
+        button_frame.pack(pady=20)
+        
+        def add_remote():
+            name = name_var.get().strip()
+            account = account_var.get()
+            owner = owner_var.get().strip()
+            repo_name = repo_name_var.get().strip()
+            
+            # Validate inputs
+            if not all([name, account, owner, repo_name]):
+                self.app.show_error("Please fill in all fields")
+                return
+            
+            if name in [r.name for r in repo.remotes]:
+                self.app.show_error(f"Remote '{name}' already exists")
+                return
+            
+            # Create remote URL
+            url = f"git@github.com-{account}:{owner}/{repo_name}.git"
+            
+            try:
+                # Add remote
+                repo.create_remote(name, url)
+                self.app.show_success(f"Remote '{name}' added successfully!")
+                add_window.destroy()
+                self.refresh_remotes_list(repo, tree)
+            except Exception as e:
+                self.app.show_error(f"Failed to add remote: {e}")
+        
+        tk.Button(button_frame, text="Cancel", command=add_window.destroy, 
+                 font=('Arial', 10), width=10).pack(side='right', padx=5)
+        tk.Button(button_frame, text="Add Remote", command=add_remote, 
+                 bg='#28a745', fg='white', font=('Arial', 10, 'bold'), width=12).pack(side='right')
+        
+        # Focus on name field
+        name_entry.focus()
+    
+    def edit_remote_dialog(self, repo: Repo, tree: ttk.Treeview):
+        """Show dialog to edit selected remote"""
+        selection = tree.selection()
+        if not selection:
+            self.app.show_error("Please select a remote to edit")
+            return
+        
+        # Get selected remote info
+        item = selection[0]
+        remote_name = tree.item(item)['values'][0]
+        current_url = tree.item(item)['values'][1]
+        
+        if remote_name == 'Error':
+            self.app.show_error("Cannot edit error entries")
+            return
+        
+        # Parse current URL to pre-fill form
+        url_info = self.app.extract_repo_info_from_url(current_url)
+        
+        edit_window = tk.Toplevel(self.root)
+        edit_window.title(f"Edit Remote: {remote_name}")
+        edit_window.geometry("600x500")
+        edit_window.transient(self.root)
+        edit_window.grab_set()
+        
+        # Header
+        tk.Label(edit_window, text=f"Edit Remote: {remote_name}", 
+                font=('Arial', 14, 'bold')).pack(pady=15)
+        
+        # Current info
+        info_frame = tk.LabelFrame(edit_window, text="Current Configuration")
+        info_frame.pack(fill='x', pady=10, padx=20)
+        
+        tk.Label(info_frame, text=f"Current URL: {current_url}", 
+                font=('Arial', 9)).pack(anchor='w', padx=15, pady=10)
+        
+        # Form frame
+        form_frame = tk.LabelFrame(edit_window, text="New Configuration")
+        form_frame.pack(fill='x', pady=15, padx=20)
+        
+        # Account selection
+        tk.Label(form_frame, text="Account:", font=('Arial', 10, 'bold')).grid(row=0, column=0, sticky='w', pady=10, padx=15)
+        account_var = tk.StringVar()
+        account_combo = ttk.Combobox(form_frame, textvariable=account_var, 
+                                   values=list(self.app.accounts.keys()), 
+                                   state='readonly', width=28)
+        account_combo.grid(row=0, column=1, pady=10, padx=15, sticky='w')
+        
+        # Repository details
+        tk.Label(form_frame, text="GitHub Owner:", font=('Arial', 10, 'bold')).grid(row=1, column=0, sticky='w', pady=10, padx=15)
+        owner_var = tk.StringVar()
+        owner_entry = tk.Entry(form_frame, textvariable=owner_var, width=30)
+        owner_entry.grid(row=1, column=1, pady=10, padx=15, sticky='w')
+        
+        tk.Label(form_frame, text="Repository Name:", font=('Arial', 10, 'bold')).grid(row=2, column=0, sticky='w', pady=10, padx=15)
+        repo_name_var = tk.StringVar()
+        repo_entry = tk.Entry(form_frame, textvariable=repo_name_var, width=30)
+        repo_entry.grid(row=2, column=1, pady=10, padx=15, sticky='w')
+        
+        # Pre-fill form if URL can be parsed
+        if url_info:
+            owner_var.set(url_info.get('owner', ''))
+            repo_name_var.set(url_info.get('repo', ''))
+            
+            # Try to detect account from URL
+            if url_info.get('host'):
+                account_name = url_info['host']
+                if account_name in self.app.accounts:
+                    account_var.set(account_name)
+        
+        # Set default account if none selected
+        if not account_var.get() and self.app.accounts:
+            account_var.set(list(self.app.accounts.keys())[0])
+        
+        # URL preview
+        preview_frame = tk.LabelFrame(edit_window, text="New URL Preview")
+        preview_frame.pack(fill='x', pady=15, padx=20)
+        
+        preview_label = tk.Label(preview_frame, text="", font=('Consolas', 9), fg='blue')
+        preview_label.pack(pady=10, padx=15)
+        
+        def update_preview(*args):
+            account = account_var.get()
+            owner = owner_var.get().strip()
+            repo_name = repo_name_var.get().strip()
+            
+            if account and owner and repo_name:
+                url = f"git@github.com-{account}:{owner}/{repo_name}.git"
+                preview_label.config(text=url)
+            else:
+                preview_label.config(text="Fill in all fields to preview URL")
+        
+        # Bind update to all relevant fields
+        for var in [account_var, owner_var, repo_name_var]:
+            var.trace('w', update_preview)
+        
+        update_preview()
+        
+        # Buttons
+        button_frame = tk.Frame(edit_window)
+        button_frame.pack(pady=20)
+        
+        def save_remote():
+            account = account_var.get()
+            owner = owner_var.get().strip()
+            repo_name = repo_name_var.get().strip()
+            
+            # Validate inputs
+            if not all([account, owner, repo_name]):
+                self.app.show_error("Please fill in all fields")
+                return
+            
+            # Create new URL
+            new_url = f"git@github.com-{account}:{owner}/{repo_name}.git"
+            
+            if new_url == current_url:
+                self.app.show_info("No changes made")
+                edit_window.destroy()
+                return
+            
+            try:
+                # Update remote URL
+                remote = repo.remotes[remote_name]
+                remote.set_url(new_url)
+                
+                self.app.show_success(f"Remote '{remote_name}' updated successfully!")
+                edit_window.destroy()
+                self.refresh_remotes_list(repo, tree)
+            except Exception as e:
+                self.app.show_error(f"Failed to update remote: {e}")
+        
+        tk.Button(button_frame, text="Cancel", command=edit_window.destroy, 
+                 font=('Arial', 10), width=10).pack(side='right', padx=5)
+        tk.Button(button_frame, text="Save Changes", command=save_remote, 
+                 bg='#007bff', fg='white', font=('Arial', 10, 'bold'), width=12).pack(side='right')
+        
+        # Focus on owner field
+        owner_entry.focus()
+    
+    def remove_remote(self, repo: Repo, tree: ttk.Treeview):
+        """Remove selected remote"""
+        selection = tree.selection()
+        if not selection:
+            self.app.show_error("Please select a remote to remove")
+            return
+        
+        # Get selected remote info
+        item = selection[0]
+        remote_name = tree.item(item)['values'][0]
+        remote_url = tree.item(item)['values'][1]
+        
+        if remote_name == 'Error':
+            self.app.show_error("Cannot remove error entries")
+            return
+        
+        # Confirm removal
+        result = messagebox.askyesno(
+            "Confirm Removal",
+            f"Are you sure you want to remove remote '{remote_name}'?\n\n"
+            f"URL: {remote_url}\n\n"
+            f"This action cannot be undone."
+        )
+        
+        if not result:
+            return
+        
+        try:
+            repo.delete_remote(remote_name)
+            self.app.show_success(f"Remote '{remote_name}' removed successfully!")
+            self.refresh_remotes_list(repo, tree)
+        except Exception as e:
+            self.app.show_error(f"Failed to remove remote: {e}")
+    
+    def test_remote_connection(self, repo: Repo, tree: ttk.Treeview):
+        """Test connection to selected remote"""
+        selection = tree.selection()
+        if not selection:
+            self.app.show_error("Please select a remote to test")
+            return
+        
+        # Get selected remote info
+        item = selection[0]
+        remote_name = tree.item(item)['values'][0]
+        
+        if remote_name == 'Error':
+            self.app.show_error("Cannot test error entries")
+            return
+        
+        def test_connection():
+            try:
+                # Try to list remote refs
+                remote = repo.remotes[remote_name]
+                refs = list(remote.refs)
+                return True, f"Connection successful! Found {len(refs)} references."
+            except Exception as e:
+                return False, f"Connection failed: {str(e)}"
+        
+        def on_test_complete(result):
+            success, message = result
+            if success:
+                self.app.show_success(f"Remote '{remote_name}' test passed:\n{message}")
+            else:
+                self.app.show_error(f"Remote '{remote_name}' test failed:\n{message}")
+        
+        self.app.safe_async_operation(test_connection, on_test_complete, 
+                                    progress_title=f"Testing {remote_name}...")
+    
+    def debug_deploy_remote(self, repo, tree):
+        """Comprehensive debugging for deploy remote issues"""
+        selection = tree.selection()
+        if not selection:
+            self.app.show_error("Please select a remote to debug")
+            return
+        
+        # Get selected remote info
+        item = selection[0]
+        remote_name = tree.item(item)['values'][0]
+        remote_url = tree.item(item)['values'][1]
+        
+        if remote_name == 'Error':
+            self.app.show_error("Cannot debug error entries")
+            return
+        
+        # Create debug window
+        debug_window = tk.Toplevel(self.root)
+        debug_window.title(f"Debug Remote: {remote_name}")
+        debug_window.geometry("800x700")
+        debug_window.transient(self.root)
+        debug_window.grab_set()
+        
+        # Header
+        header_frame = tk.Frame(debug_window)
+        header_frame.pack(fill='x', pady=15, padx=20)
+        
+        tk.Label(header_frame, text=f"Debug Report: {remote_name}", 
+                font=('Arial', 16, 'bold')).pack()
+        tk.Label(header_frame, text=f"URL: {remote_url}", 
+                font=('Arial', 10)).pack(pady=5)
+        
+        # Results area
+        results_frame = tk.Frame(debug_window)
+        results_frame.pack(fill='both', expand=True, pady=10, padx=20)
+        
+        # Text widget for results
+        results_text = tk.Text(results_frame, wrap=tk.WORD, font=('Consolas', 10))
+        scrollbar = ttk.Scrollbar(results_frame, orient="vertical", command=results_text.yview)
+        results_text.configure(yscrollcommand=scrollbar.set)
+        
+        results_text.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Progress info
+        progress_label = tk.Label(debug_window, text="Starting diagnostic...", 
+                                font=('Arial', 9), fg='blue')
+        progress_label.pack(pady=5)
+        
+        # Buttons
+        button_frame = tk.Frame(debug_window)
+        button_frame.pack(pady=15)
+        
+        def run_diagnostics():
+            """Run comprehensive diagnostics"""
+            results_text.delete('1.0', tk.END)
+            results_text.insert(tk.END, f"🔍 DEPLOY REMOTE DIAGNOSTIC REPORT\n")
+            results_text.insert(tk.END, f"Remote: {remote_name}\n")
+            results_text.insert(tk.END, f"URL: {remote_url}\n")
+            results_text.insert(tk.END, f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            results_text.insert(tk.END, "=" * 60 + "\n\n")
+            
+            debug_window.update()
+            
+            # 1. Parse remote URL
+            progress_label.config(text="Analyzing remote URL...")
+            debug_window.update()
+            
+            url_info = self.app.extract_repo_info_from_url(remote_url)
+            if url_info:
+                results_text.insert(tk.END, "✅ URL PARSING\n")
+                results_text.insert(tk.END, f"   Protocol: {url_info.get('protocol', 'Unknown')}\n")
+                results_text.insert(tk.END, f"   Host: {url_info.get('host', 'Standard GitHub')}\n")
+                results_text.insert(tk.END, f"   Owner: {url_info.get('owner', 'Unknown')}\n")
+                results_text.insert(tk.END, f"   Repository: {url_info.get('repo', 'Unknown')}\n\n")
+            else:
+                results_text.insert(tk.END, "❌ URL PARSING\n")
+                results_text.insert(tk.END, f"   Could not parse URL: {remote_url}\n\n")
+            
+            # 2. Check account configuration
+            progress_label.config(text="Checking account configuration...")
+            debug_window.update()
+            
+            if url_info and url_info.get('host'):
+                account_name = url_info['host']
+                if account_name in self.app.accounts:
+                    account = self.app.accounts[account_name]
+                    results_text.insert(tk.END, "✅ ACCOUNT CONFIGURATION\n")
+                    results_text.insert(tk.END, f"   Account: {account_name}\n")
+                    results_text.insert(tk.END, f"   Email: {account.email}\n")
+                    results_text.insert(tk.END, f"   GitHub Username: {account.github_username}\n")
+                    results_text.insert(tk.END, f"   Token Available: {'Yes' if account.token else 'No'}\n")
+                    results_text.insert(tk.END, f"   SSH Key Path: {account.ssh_key_path}\n\n")
+                else:
+                    results_text.insert(tk.END, "❌ ACCOUNT CONFIGURATION\n")
+                    results_text.insert(tk.END, f"   Account '{account_name}' not found in app\n")
+                    results_text.insert(tk.END, f"   Available accounts: {list(self.app.accounts.keys())}\n\n")
+            else:
+                results_text.insert(tk.END, "⚠️ ACCOUNT CONFIGURATION\n")
+                results_text.insert(tk.END, "   Standard GitHub URL - no specific account configured\n\n")
+            
+            # 3. Check SSH key files
+            progress_label.config(text="Checking SSH key files...")
+            debug_window.update()
+            
+            if url_info and url_info.get('host') and url_info['host'] in self.app.accounts:
+                account = self.app.accounts[url_info['host']]
+                ssh_key_path = account.ssh_key_path
+                
+                if os.path.exists(ssh_key_path):
+                    results_text.insert(tk.END, "✅ SSH KEY FILES\n")
+                    results_text.insert(tk.END, f"   Private key exists: {ssh_key_path}\n")
+                    
+                    if os.path.exists(f"{ssh_key_path}.pub"):
+                        results_text.insert(tk.END, f"   Public key exists: {ssh_key_path}.pub\n")
+                        
+                        # Show public key fingerprint
+                        try:
+                            with open(f"{ssh_key_path}.pub", 'r') as f:
+                                pub_key = f.read().strip()
+                                results_text.insert(tk.END, f"   Public key: {pub_key[:50]}...\n")
+                        except Exception as e:
+                            results_text.insert(tk.END, f"   Error reading public key: {e}\n")
+                    else:
+                        results_text.insert(tk.END, "❌ Public key missing\n")
+                    results_text.insert(tk.END, "\n")
+                else:
+                    results_text.insert(tk.END, "❌ SSH KEY FILES\n")
+                    results_text.insert(tk.END, f"   Private key missing: {ssh_key_path}\n\n")
+            
+            # 4. Check SSH configuration
+            progress_label.config(text="Checking SSH configuration...")
+            debug_window.update()
+            
+            ssh_config_path = os.path.expanduser("~/.ssh/config")
+            if os.path.exists(ssh_config_path):
+                with open(ssh_config_path, 'r') as f:
+                    ssh_config = f.read()
+                
+                if url_info and url_info.get('host'):
+                    host_pattern = f"github.com-{url_info['host']}"
+                    if host_pattern in ssh_config:
+                        results_text.insert(tk.END, "✅ SSH CONFIGURATION\n")
+                        results_text.insert(tk.END, f"   Host entry found for: {host_pattern}\n\n")
+                    else:
+                        results_text.insert(tk.END, "❌ SSH CONFIGURATION\n")
+                        results_text.insert(tk.END, f"   No SSH config entry for: {host_pattern}\n\n")
+                else:
+                    results_text.insert(tk.END, "⚠️ SSH CONFIGURATION\n")
+                    results_text.insert(tk.END, "   Using standard GitHub SSH configuration\n\n")
+            else:
+                results_text.insert(tk.END, "❌ SSH CONFIGURATION\n")
+                results_text.insert(tk.END, "   No ~/.ssh/config file found\n\n")
+            
+            # 5. Test SSH connection
+            progress_label.config(text="Testing SSH connection...")
+            debug_window.update()
+            
+            try:
+                if url_info and url_info.get('host'):
+                    ssh_host = f"git@github.com-{url_info['host']}"
+                else:
+                    ssh_host = "git@github.com"
+                
+                ssh_result = subprocess.run(
+                    ["ssh", "-T", "-o", "ConnectTimeout=10", ssh_host], 
+                    capture_output=True, text=True, timeout=15
+                )
+                
+                if "successfully authenticated" in ssh_result.stderr:
+                    results_text.insert(tk.END, "✅ SSH CONNECTION\n")
+                    results_text.insert(tk.END, f"   Successfully authenticated to {ssh_host}\n")
+                    results_text.insert(tk.END, f"   Response: {ssh_result.stderr.strip()}\n\n")
+                else:
+                    results_text.insert(tk.END, "❌ SSH CONNECTION\n")
+                    results_text.insert(tk.END, f"   Failed to authenticate to {ssh_host}\n")
+                    results_text.insert(tk.END, f"   Error: {ssh_result.stderr or ssh_result.stdout}\n\n")
+            
+            except subprocess.TimeoutExpired:
+                results_text.insert(tk.END, "❌ SSH CONNECTION\n")
+                results_text.insert(tk.END, "   Connection timeout (10 seconds)\n\n")
+            except Exception as e:
+                results_text.insert(tk.END, "❌ SSH CONNECTION\n")
+                results_text.insert(tk.END, f"   Error: {str(e)}\n\n")
+            
+            # 6. Test git remote operations
+            progress_label.config(text="Testing Git remote operations...")
+            debug_window.update()
+            
+            try:
+                # Test ls-remote
+                ls_remote_result = subprocess.run(
+                    ["git", "ls-remote", remote_name], 
+                    cwd=repo.working_dir,
+                    capture_output=True, text=True, timeout=30
+                )
+                
+                if ls_remote_result.returncode == 0:
+                    refs = ls_remote_result.stdout.strip().split('\n')
+                    results_text.insert(tk.END, "✅ GIT REMOTE ACCESS\n")
+                    results_text.insert(tk.END, f"   Successfully accessed remote '{remote_name}'\n")
+                    results_text.insert(tk.END, f"   Found {len(refs)} references\n")
+                    
+                    # Show some refs
+                    for i, ref in enumerate(refs[:5]):
+                        if ref.strip():
+                            ref_parts = ref.split('\t')
+                            if len(ref_parts) == 2:
+                                results_text.insert(tk.END, f"     {ref_parts[1]}\n")
+                    
+                    if len(refs) > 5:
+                        results_text.insert(tk.END, f"     ... and {len(refs) - 5} more\n")
+                    results_text.insert(tk.END, "\n")
+                else:
+                    results_text.insert(tk.END, "❌ GIT REMOTE ACCESS\n")
+                    results_text.insert(tk.END, f"   Failed to access remote '{remote_name}'\n")
+                    results_text.insert(tk.END, f"   Error: {ls_remote_result.stderr}\n\n")
+            
+            except subprocess.TimeoutExpired:
+                results_text.insert(tk.END, "❌ GIT REMOTE ACCESS\n")
+                results_text.insert(tk.END, "   Git operation timeout (30 seconds)\n\n")
+            except Exception as e:
+                results_text.insert(tk.END, "❌ GIT REMOTE ACCESS\n")
+                results_text.insert(tk.END, f"   Error: {str(e)}\n\n")
+            
+            # 7. Check local repository status
+            progress_label.config(text="Checking local repository status...")
+            debug_window.update()
+            
+            try:
+                # Check current branch
+                current_branch = repo.active_branch.name
+                results_text.insert(tk.END, "📊 LOCAL REPOSITORY STATUS\n")
+                results_text.insert(tk.END, f"   Current branch: {current_branch}\n")
+                
+                # Check if there are commits to push
+                try:
+                    # Get commits ahead of remote
+                    remote_branch = f"{remote_name}/{current_branch}"
+                    if remote_branch in [str(ref) for ref in repo.refs]:
+                        ahead_commits = list(repo.iter_commits(f'{remote_branch}..HEAD'))
+                        results_text.insert(tk.END, f"   Commits ahead of {remote_name}: {len(ahead_commits)}\n")
+                    else:
+                        results_text.insert(tk.END, f"   No tracking info for {remote_name}/{current_branch}\n")
+                except:
+                    results_text.insert(tk.END, "   Could not determine commit status\n")
+                
+                # Check working directory status
+                if repo.is_dirty():
+                    results_text.insert(tk.END, "   Working directory: Modified files present\n")
+                else:
+                    results_text.insert(tk.END, "   Working directory: Clean\n")
+                
+                results_text.insert(tk.END, "\n")
+            
+            except Exception as e:
+                results_text.insert(tk.END, "❌ LOCAL REPOSITORY STATUS\n")
+                results_text.insert(tk.END, f"   Error: {str(e)}\n\n")
+            
+            # 8. Recommendations
+            results_text.insert(tk.END, "💡 RECOMMENDATIONS\n")
+            
+            # Check for common issues and provide fixes
+            if url_info and url_info.get('host'):
+                account_name = url_info['host']
+                if account_name not in self.app.accounts:
+                    results_text.insert(tk.END, f"   ❗ Add account '{account_name}' to the application\n")
+                
+                ssh_key_path = self.app.accounts.get(account_name, {}).ssh_key_path if account_name in self.app.accounts else f"~/.ssh/{account_name}"
+                if not os.path.exists(os.path.expanduser(ssh_key_path)):
+                    results_text.insert(tk.END, f"   ❗ Generate SSH key: ssh-keygen -t ed25519 -f {ssh_key_path}\n")
+            
+            # SSH connection failed
+            if "❌ SSH CONNECTION" in results_text.get('1.0', tk.END):
+                results_text.insert(tk.END, "   ❗ Add SSH public key to GitHub account\n")
+                results_text.insert(tk.END, "   ❗ Check SSH agent: ssh-add ~/.ssh/your-key\n")
+            
+            # Git remote access failed
+            if "❌ GIT REMOTE ACCESS" in results_text.get('1.0', tk.END):
+                results_text.insert(tk.END, "   ❗ Verify repository exists on GitHub\n")
+                results_text.insert(tk.END, "   ❗ Check repository permissions\n")
+                results_text.insert(tk.END, "   ❗ Verify remote URL is correct\n")
+            
+            results_text.insert(tk.END, "\n" + "=" * 60 + "\n")
+            results_text.insert(tk.END, "Diagnostic complete!")
+            
+            progress_label.config(text="Diagnostic complete!", fg='green')
+            
+            # Scroll to top
+            results_text.see('1.0')
+        
+        def copy_report():
+            """Copy the diagnostic report to clipboard"""
+            report = results_text.get('1.0', tk.END)
+            debug_window.clipboard_clear()
+            debug_window.clipboard_append(report)
+            self.app.show_success("Diagnostic report copied to clipboard!")
+        
+        def fix_common_issues():
+            """Try to fix common issues automatically"""
+            if url_info and url_info.get('host'):
+                account_name = url_info['host']
+                
+                # Try to add SSH key to agent
+                if account_name in self.app.accounts:
+                    account = self.app.accounts[account_name]
+                    try:
+                        subprocess.run(["ssh-add", account.ssh_key_path], 
+                                    check=False, capture_output=True, timeout=5)
+                        self.app.show_success(f"Added SSH key for {account_name} to SSH agent")
+                    except:
+                        self.app.show_error(f"Failed to add SSH key to agent")
+        
+        # Buttons
+        tk.Button(button_frame, text="🔍 Run Diagnostics", command=run_diagnostics, 
+                bg='#007bff', fg='white', font=('Arial', 10, 'bold'), width=15).pack(side='left', padx=5)
+        tk.Button(button_frame, text="📋 Copy Report", command=copy_report, 
+                font=('Arial', 10), width=12).pack(side='left', padx=5)
+        tk.Button(button_frame, text="🔧 Quick Fix", command=fix_common_issues, 
+                font=('Arial', 10), width=12).pack(side='left', padx=5)
+        tk.Button(button_frame, text="Close", command=debug_window.destroy, 
+                font=('Arial', 10), width=10).pack(side='right', padx=5)
+        
+        # Auto-run diagnostics
+        debug_window.after(500, run_diagnostics)
+        
+    def set_default_remote(self, repo: Repo, tree: ttk.Treeview):
+        """Set selected remote as the default (origin)"""
+        selection = tree.selection()
+        if not selection:
+            self.app.show_error("Please select a remote to set as default")
+            return
+        
+        # Get selected remote info
+        item = selection[0]
+        remote_name = tree.item(item)['values'][0]
+        remote_url = tree.item(item)['values'][1]
+        
+        if remote_name == 'Error':
+            self.app.show_error("Cannot use error entries")
+            return
+        
+        if remote_name == 'origin':
+            self.app.show_info("This remote is already the default (origin)")
+            return
+        
+        # Confirm action
+        result = messagebox.askyesno(
+            "Set Default Remote",
+            f"Set '{remote_name}' as the default remote?\n\n"
+            f"This will:\n"
+            f"• Rename current 'origin' to 'origin-backup' (if exists)\n"
+            f"• Rename '{remote_name}' to 'origin'\n\n"
+            f"Continue?"
+        )
+        
+        if not result:
+            return
+        
+        try:
+            # Backup current origin if it exists
+            if 'origin' in [r.name for r in repo.remotes]:
+                origin_remote = repo.remotes['origin']
+                origin_url = origin_remote.url
+                
+                # Create backup
+                backup_name = 'origin-backup'
+                counter = 1
+                while backup_name in [r.name for r in repo.remotes]:
+                    backup_name = f'origin-backup-{counter}'
+                    counter += 1
+                
+                repo.create_remote(backup_name, origin_url)
+                repo.delete_remote('origin')
+            
+            # Rename selected remote to origin
+            selected_remote = repo.remotes[remote_name]
+            selected_url = selected_remote.url
+            
+            repo.delete_remote(remote_name)
+            repo.create_remote('origin', selected_url)
+            
+            self.app.show_success(f"Remote '{remote_name}' is now the default (origin)")
+            self.refresh_remotes_list(repo, tree)
+            
+        except Exception as e:
+            self.app.show_error(f"Failed to set default remote: {e}")
+
+
+# Integration code to add to the main ImprovedGitHubAccountManager class
+def integrate_remote_manager(app_instance):
+    """Integrate the remote manager into the existing app"""
+    
+    # Add remote manager instance
+    app_instance.remote_manager = RemoteManager(app_instance)
+    
+    # Add the manage remotes button to the existing actions frame
+    # This should be called after the repositories tab is set up
+    
+    # Find the repositories tab actions frame and add the button
+    repos_frame = None
+    for child in app_instance.repos_frame.winfo_children():
+        if isinstance(child, ttk.LabelFrame) and "Repositories" in str(child.cget("text")):
+            repos_frame = child
+            break
+    
+    if repos_frame:
+        # Find the actions frame within the repositories frame
+        for child in repos_frame.winfo_children():
+            if isinstance(child, ttk.Frame) and hasattr(child, 'winfo_children'):
+                # Check if this frame contains buttons (actions frame)
+                children = child.winfo_children()
+                if children and any(isinstance(c, ttk.Button) for c in children):
+                    # This is the actions frame - add our button
+                    ttk.Button(child, text="🔗 Manage Remotes", 
+                              command=app_instance.remote_manager.show_manage_remotes_dialog).pack(side='left', padx=5)
+                    break
+
 class ImprovedGitHubAccountManager:
     """Improved GitHub Account Manager with better UX - FIXED VERSION"""
     
@@ -669,6 +1662,8 @@ class ImprovedGitHubAccountManager:
         self.repos: List[Tuple] = []
         self.last_scanned_path = ""
         
+        self.remote_manager = RemoteManager(self)
+
         # Load configuration
         self.load_config()
         
@@ -1226,6 +2221,9 @@ Host github.com-{account.name}
         ttk.Button(actions_frame, text="🔍 Show Repository Details", 
                   command=self.show_repo_details).pack(side='left', padx=5)
     
+        ttk.Button(actions_frame, text="🔗 Manage Remotes", 
+          command=self.remote_manager.show_manage_remotes_dialog).pack(side='left', padx=5)
+        
     def setup_settings_tab(self):
         """Setup settings tab"""
         # System info
